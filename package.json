@@ -1,0 +1,14 @@
+{
+  "name": "copilot-critter-call",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local, video-call-style companion for Copilot sessions.",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "demo": "node --disable-warning=ExperimentalWarning server.mjs --demo",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.mjs",
+    "test:browser": "node --disable-warning=ExperimentalWarning test/browser.mjs"
+  }
+}

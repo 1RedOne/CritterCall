@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Critter Call · Your agents, together</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/vendor/riffwave.js"></script>
+  <script defer src="/vendor/animalese.js"></script>
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand" aria-label="Critter Call home">
+      <span class="brand-icon" aria-hidden="true">&#10035;</span>
+      <span>critter<span class="brand-light">call</span><span class="beta">LOCAL LAB</span></span>
+    </a>
+    <nav class="room-switch" aria-label="Room">
+      <a href="/" id="live-room">My sessions</a>
+      <a href="/?demo=1" id="demo-room">Demo room</a>
+    </nav>
+    <button id="connect" class="button secondary"><span aria-hidden="true">&#8644;</span> Connect agents</button>
+  </header>
+
+  <main>
+    <section class="meeting" aria-labelledby="room-title">
+      <div class="room-heading">
+        <div>
+          <div class="eyebrow"><span class="status-dot"></span> YOUR LITTLE CO-WORKING SPACE</div>
+          <h1 id="room-title">The workshop<span class="heading-dot">.</span></h1>
+          <p class="room-subtitle">Big ideas. Tiny faces. Everyone gets a turn.</p>
+        </div>
+        <div class="room-meta">
+          <span id="session-count" class="pill">Connecting...</span>
+          <span id="connection" class="sync">Reading local sessions</span>
+          <a href="/character-lab" class="lab-link">Character lab <span aria-hidden="true">&#8599;</span></a>
+        </div>
+      </div>
+
+      <div id="warnings" class="notice" role="status" hidden></div>
+      <div class="grid-bar">
+        <div id="session-views" class="session-views" role="group" aria-label="Call views">
+          <button type="button" data-view="in-room" aria-pressed="true">In the room <span id="tile-count" class="count">0</span></button>
+          <button type="button" data-view="resolved" aria-pressed="false">Out to play <span id="resolved-count" class="count">0</span></button>
+          <button type="button" data-view="archived" aria-pressed="false">Archived <span id="archived-count" class="count">0</span></button>
+        </div>
+        <button id="next-hand" class="hand-queue" disabled><span aria-hidden="true">&#9995;</span> <span id="hand-count">No hands raised</span></button>
+      </div>
+      <div id="grid" class="agent-grid" aria-label="Copilot sessions"></div>
+      <div id="empty" class="empty" hidden>
+        <span aria-hidden="true">&#127793;</span>
+        <h2 id="empty-title">A little quiet in here.</h2>
+        <p id="empty-description">Open a Copilot session to bring a critter into the room, or explore the demo.</p>
+        <a id="empty-demo" href="/?demo=1" class="button primary">Visit the demo room</a>
+      </div>
+      <footer class="meeting-footer">
+        <span class="local-note"><span aria-hidden="true">&#9678;</span> Local-first. No camera. No microphone.<br><a href="/vendor/NOTICE.txt" target="_blank" rel="noopener">Audio: animalese.js by Josh Simmons (CC BY 4.0)</a></span>
+        <div class="sound-controls">
+          <label class="sound-label" for="sound">Agent voice</label>
+          <select id="sound">
+            <option value="chatter">Animalese</option>
+            <option value="speech">Readable voice</option>
+            <option value="off">Silent</option>
+          </select>
+          <button id="stop-audio" class="button icon-button" title="Stop playback" aria-label="Stop playback">&#9632;</button>
+        </div>
+      </footer>
+    </section>
+
+    <aside class="conversation" aria-labelledby="conversation-title">
+      <div class="conversation-top">
+        <span class="eyebrow">THE FLOOR IS YOURS</span>
+        <span id="source-badge" class="source-badge">Choose a critter</span>
+      </div>
+      <div id="selected-profile" class="selected-profile">
+        <div id="selected-emoji" class="profile-emoji" aria-hidden="true">&#127793;</div>
+        <h2 id="conversation-title">A seat for everyone.</h2>
+        <p id="selected-title">Click a raised hand to hear what is on their mind.</p>
+      </div>
+      <div id="request-picker" class="request-picker" aria-label="Pending hands" hidden></div>
+      <div class="transcript-heading"><span>Conversation</span><button id="replay" class="text-button" disabled>Play again <span aria-hidden="true">&#9655;</span></button></div>
+      <div id="transcript" class="transcript" role="log" aria-label="Selected agent conversation"></div>
+      <div id="reply-status" class="reply-status" role="status">Select a character to get started.</div>
+      <form id="reply-form" class="composer">
+        <label for="reply" id="reply-label">A little direction goes a long way.</label>
+        <textarea id="reply" rows="3" maxlength="12000" placeholder="Your thoughts, extra context, or a tiny pep talk..." disabled></textarea>
+        <div class="composer-bottom">
+          <span id="composer-hint">Replies go to one agent only</span>
+          <button id="send" type="submit" class="button primary" disabled>Send reply <span aria-hidden="true">&#8599;</span></button>
+        </div>
+      </form>
+      <div class="conversation-actions">
+        <button id="dismiss" class="text-button" disabled>Dismiss hand</button>
+        <button id="demo-hand" class="text-button" hidden>Raise a demo hand <span aria-hidden="true">&#9995;</span></button>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="session-menu" class="session-menu" role="menu" aria-label="Move call" hidden>
+    <div id="menu-title" class="menu-title"></div>
+    <button type="button" role="menuitem" data-state="resolved">Move to Resolved</button>
+    <button type="button" role="menuitem" data-state="archived">Move to Archived</button>
+    <button type="button" role="menuitem" data-state="in-room">Move back to room</button>
+    <p>This only organizes your call.</p>
+  </div>
+  <dialog id="setup">
+    <div class="dialog-heading"><div><div class="eyebrow">A SMALL BRIDGE, NOT A NEW AGENT</div><h2>Bring your critters to life.</h2></div><button id="close-setup" class="button icon-button" aria-label="Close setup">&#10005;</button></div>
+    <p>The room observes your 12 most recently used local Copilot tabs. To receive replies, connect this MCP server in the Copilot app or CLI and reload its tools. Your existing permission controls stay in place.</p>
+    <p>Merge this entry into your MCP configuration; do not replace your other servers. In the CLI, use <code>/mcp</code>. Existing tabs need to load the new server before they can use it.</p>
+    <pre id="bridge-config"></pre>
+    <button id="copy-config" class="button primary">Copy bridge configuration</button>
+    <h3>Give each agent this instruction</h3>
+    <pre id="agent-instruction">When you have an update, question, or need context, use critter-call's raise_hand tool with your current session UUID, a concise message, and kind update/question/context. Subagents: include agentName. For a question or context request, use get_reply with the returned requestId; pending is not an answer. Do not use this bridge for permission approvals or secrets.</pre>
+    <button id="copy-instruction" class="button secondary">Copy agent instruction</button>
+    <p class="fine-print">History-only sessions can be read here, but their replies must be pasted into Copilot. No transcripts are uploaded by this page. Animalese uses a local copy of animalese.js and Josh Simmons's CC BY 4.0 audio bank; readable voice uses an available local browser voice. Playback covers the last three sentences or last 120 characters, whichever is shorter, with a moving word highlight.</p>
+  </dialog>
+</body>
+</html>

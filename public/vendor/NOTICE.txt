@@ -1,0 +1,19 @@
+animalese.js audio
+Copyright (c) 2014 Josh Simmons (Acedio).
+Source: https://github.com/Acedio/animalese.js
+Pinned revision: 6f18a909df12cdddab59438640ac8019b78fac2f
+
+animalese.js code is MIT licensed. See LICENSE.md.
+animalese.wav is licensed under Creative Commons Attribution 4.0:
+https://creativecommons.org/licenses/by/4.0/
+
+Critter Call generates speech from this audio bank, using per-character pitch.
+The audio bank is distributed unchanged. The engine has a small local change
+to report audio-loading errors, reject failed responses, and validate its bank.
+Generated speech is adapted audio; credit Josh Simmons when redistributing it.
+
+riffwave.js v0.03 is public domain, by Pedro Ladaria (2011).
+riffwave.js has a local correction to the generated WAV byte-rate header.
+
+This project is not affiliated with Nintendo Co., Ltd.
+Animal Crossing is a copyright of Nintendo Co., Ltd.

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Character Lab · Critter Call</title>
+  <link rel="stylesheet" href="/character-lab.css">
+  <script defer src="/vendor/riffwave.js"></script>
+  <script defer src="/vendor/animalese.js"></script>
+  <script type="module" src="/character-lab.mjs"></script>
+</head>
+<body>
+  <a class="skip-link" href="#lab">Skip to character lab</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Critter Call home"><span class="brand-icon" aria-hidden="true">✳</span><span>critter<span class="brand-light">call</span></span></a>
+    <span class="lab-tag">CHARACTER LAB</span>
+    <a class="button secondary back-link" href="/">← Back to the call</a>
+  </header>
+  <main id="lab">
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow"><span class="status-dot"></span> A LITTLE PERSONALITY, BY DESIGN</p>
+      <h1 id="page-title">Meet your next little co-worker<span>.</span></h1>
+      <p>One seed. A tiny face. Three perfectly aligned layers. Make a critter that feels like you.</p>
+    </section>
+
+    <div class="workspace">
+      <section class="panel seed-panel" aria-labelledby="seed-title">
+        <div class="section-heading"><h2 id="seed-title"><span class="step">01</span> Plant a seed</h2><span class="chip">LOCAL FIRST</span></div>
+        <label for="seed-text">A name, a thought, a tiny mission</label>
+        <textarea id="seed-text" rows="4" maxlength="4096" aria-describedby="seed-hint seed-count" spellcheck="false">Make small things, with great care.</textarea>
+        <div class="input-footer"><span id="seed-hint">Exact text matters, including spaces and case.</span><output id="seed-count" for="seed-text">0 / 4096</output></div>
+        <p class="privacy-note">Browser previews stay on this device. Only “Preview via local API” sends the seed to this same local server. No camera, accounts, or outside requests.</p>
+        <div class="hash-flow" aria-label="Generation pipeline"><span>YOUR TEXT</span><span aria-hidden="true">→</span><span>SHA-256</span><span aria-hidden="true">→</span><span>YOUR CRITTER</span></div>
+        <label for="seed-hash">SHA-256 · computed in your browser</label>
+        <output id="seed-hash" class="hash" for="seed-text" aria-live="off">Waiting for the character kit…</output>
+        <p id="generation-status" class="status" role="status">Loading the local character kit…</p>
+        <p id="lab-error" class="error" role="alert" hidden></p>
+
+        <div class="section-heading customize-heading"><h2 id="traits-title"><span class="step">02</span> Add your own twist</h2><button id="reset-seed" class="text-button" type="button" disabled>Reset to seeded</button></div>
+        <p class="section-note">Leave any part on automatic to let the hash choose.</p>
+        <fieldset id="trait-controls" disabled aria-labelledby="traits-title">
+          <div class="trait-selects">
+            <div><label for="trait-body">Body</label><select id="trait-body" data-trait="body"><option value="">Automatic · seeded</option></select></div>
+            <div><label for="trait-background">Background</label><select id="trait-background" data-trait="background"><option value="">Automatic · seeded</option></select></div>
+            <div><label for="trait-face">Face</label><select id="trait-face" data-trait="face"><option value="">Automatic · seeded</option></select></div>
+            <div><label for="trait-accessory">Accessory</label><select id="trait-accessory" data-trait="accessory"><option value="">Automatic · seeded</option></select></div>
+            <div><label for="trait-decoration">Decoration</label><select id="trait-decoration" data-trait="decoration"><option value="">Automatic · seeded</option></select></div>
+            <div><label for="trait-palette">Palette</label><select id="trait-palette" data-trait="palette"><option value="">Automatic · seeded</option></select></div>
+          </div>
+        </fieldset>
+        <div class="api-action">
+          <button id="service-preview" class="button primary" type="button" disabled>Preview via local API <span aria-hidden="true">↗</span></button>
+          <p id="service-status" class="status" role="status">Optional: compare the same seed and overrides with the local service.</p>
+        </div>
+      </section>
+
+      <section class="panel preview-panel" aria-labelledby="preview-title">
+        <div class="section-heading"><h2 id="preview-title"><span class="step">03</span> Hello, little one</h2><span id="render-source" class="chip">BROWSER PREVIEW</span></div>
+        <figure class="hero-figure">
+          <div id="character-stage" class="character-stage" role="img" aria-label="Character preview is loading" aria-busy="true">
+            <img id="preview-background" class="scene-layer" alt="" hidden>
+            <div id="character-motion" class="character-motion"><img id="preview-character" class="scene-layer" alt="" hidden></div>
+            <img id="preview-foreground" class="scene-layer" alt="" hidden>
+            <span id="preview-placeholder" class="preview-placeholder">Your little co-worker is on the way…</span>
+          </div>
+          <figcaption><span class="live-dot" aria-hidden="true"></span><span id="preview-caption">320 × 240 · three independent SVG layers</span></figcaption>
+        </figure>
+        <fieldset class="motion-controls">
+          <legend>Try a little expression</legend>
+          <label class="toggle"><input id="preview-speaking" type="checkbox"><span>Speaking</span><span aria-hidden="true">♫</span></label>
+          <label class="toggle"><input id="preview-hand" type="checkbox"><span>Hand raised</span><span aria-hidden="true">✋</span></label>
+        </fieldset>
+        <p class="motion-note">Only the character moves. Background and foreground stay put. Reduced-motion preferences are respected.</p>
+        <div class="traits-heading"><h3>Character recipe</h3><span id="recipe-mode">Seeded automatically</span></div>
+        <dl id="resolved-traits" class="resolved-traits"></dl>
+        <p class="fine-print">Overrides change the recipe, not the hash. Identical text + overrides always makes the same character.</p>
+        <section class="voice-preview" aria-labelledby="voice-title">
+          <div class="traits-heading"><h3 id="voice-title">A little voice to match</h3><span>FROM THE SAME HASH</span></div>
+          <dl class="voice-settings"><div><dt>Pitch</dt><dd id="voice-pitch">—</dd></div><div><dt>Rate</dt><dd id="voice-rate">—</dd></div></dl>
+          <label for="voice-mode">Preview voice</label>
+          <select id="voice-mode"><option value="chatter">Animalese · tiny critter chatter</option><option value="speech">Readable · local browser voice</option></select>
+          <div class="voice-actions"><button id="preview-voice" class="button secondary" type="button" disabled>Preview voice ♫</button><button id="stop-voice" class="button secondary" type="button" disabled>Stop ■</button></div>
+          <p id="voice-status" class="status" role="status">Loading voice preview…</p>
+          <p id="voice-error" class="error" role="alert" hidden></p>
+          <p class="fine-print">Says “Hello! Ready to help?” only when you press play. No automatic audio. Readable mode uses local voices only. <a href="/vendor/NOTICE.txt" target="_blank" rel="noopener">Animalese credits</a>.</p>
+        </section>
+      </section>
+    </div>
+
+    <section class="panel layer-panel" aria-labelledby="layers-title">
+      <div class="section-heading"><div><h2 id="layers-title">A tiny scene, in three parts</h2><p class="section-note">Aligned at 320 × 240. Stack background → character → foreground.</p></div><span class="chip">SVG · RESOLUTION INDEPENDENT</span></div>
+      <div class="layer-grid">
+        <article class="layer-card">
+          <div class="layer-heading"><h3>01 / Background</h3><span>The setting</span></div>
+          <div class="layer-canvas"><img id="layer-background" alt="Isolated background layer preview" hidden></div>
+          <div class="layer-actions"><button class="button secondary" type="button" data-preview-layer="background" disabled>Preview SVG</button><button class="button secondary" type="button" data-download-layer="background" disabled>Download SVG ↓</button></div>
+        </article>
+        <article class="layer-card">
+          <div class="layer-heading"><h3>02 / Character</h3><span>The personality</span></div>
+          <div class="layer-canvas"><img id="layer-character" alt="Isolated character layer preview on a transparency grid" hidden></div>
+          <div class="layer-actions"><button class="button secondary" type="button" data-preview-layer="character" disabled>Preview SVG</button><button class="button secondary" type="button" data-download-layer="character" disabled>Download SVG ↓</button></div>
+        </article>
+        <article class="layer-card">
+          <div class="layer-heading"><h3>03 / Foreground</h3><span>The finishing touch</span></div>
+          <div class="layer-canvas"><img id="layer-foreground" alt="Isolated foreground layer preview on a transparency grid" hidden></div>
+          <div class="layer-actions"><button class="button secondary" type="button" data-preview-layer="foreground" disabled>Preview SVG</button><button class="button secondary" type="button" data-download-layer="foreground" disabled>Download SVG ↓</button></div>
+        </article>
+      </div>
+      <p id="download-status" class="status" role="status">Downloads become available once your preview is ready.</p>
+    </section>
+
+    <section class="panel code-panel" aria-labelledby="code-title">
+      <div><p class="eyebrow">SMALL API. ENDLESS LITTLE FACES.</p><h2 id="code-title">Take the recipe with you.</h2><p>The current text and overrides, ready to try. Browser rendering needs no request; the optional API uses the same generator.</p></div>
+      <pre><code id="code-example">Loading the local generator example…</code></pre>
+    </section>
+    <footer class="footer"><a href="/">← Back to Critter Call</a><span>Less camera fatigue. More character.</span></footer>
+  </main>
+  <dialog id="layer-dialog" aria-labelledby="layer-dialog-title">
+    <div class="section-heading"><h2 id="layer-dialog-title">SVG layer preview</h2><button id="close-layer-dialog" class="button secondary" type="button" autofocus>Close ×</button></div>
+    <div class="dialog-canvas"><img id="dialog-layer-image" alt=""></div>
+    <p class="section-note">Original SVG · 320 × 240 · Escape to close</p>
+    <button id="dialog-download" class="button primary" type="button">Download this SVG ↓</button>
+  </dialog>
+  <noscript><p class="error">Character Lab needs JavaScript to compute SHA-256 and render local SVG previews.</p></noscript>
+</body>
+</html>
