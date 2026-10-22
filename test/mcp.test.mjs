@@ -15,6 +15,7 @@ test('real stdio MCP handshake, tool discovery, raised hand, and persistent huma
     await reconnect?.close();
     await rm(home, { recursive: true, force: true });
   });
+
   const initialized = await client.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(initialized.protocolVersion, '2025-06-18');
   assert.equal(initialized.serverInfo.name, 'critter-call');
@@ -35,4 +36,25 @@ test('real stdio MCP handshake, tool discovery, raised hand, and persistent huma
   await client.close();
   reconnect = mcpClient(home);
   assert.equal((await reconnect.call('get_reply', { requestId: hand.id, waitSeconds: 0 })).reply, 'Use the feature branch');
+});
+
+test('concurrent MCP clients coalesce the same agent hand across processes', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'critter-mcp-coalesce-test-'));
+  const clients = [mcpClient(home), mcpClient(home)];
+  t.after(async () => {
+    await Promise.all(clients.map(client => client.close()));
+    await rm(home, { recursive: true, force: true });
+  });
+  const input = { sessionId: '00000000-0000-4000-8000-000000000001', agentName: 'Same helper' };
+  const results = await Promise.all(Array.from({ length: 10 }, (_, index) =>
+    clients[index % 2].call('raise_hand', { ...input, message: `Context ${index}` })));
+  assert.equal(new Set(results.map(row => row.id)).size, 1);
+  const store = new BridgeStore(join(home, 'critter-call', 'bridge.db'));
+  try {
+    assert.equal(store.list().filter(row => row.status === 'pending').length, 1);
+    store.reply(results[0].id, 'One answer');
+    for (const client of clients) {
+      assert.equal((await client.call('get_reply', { requestId: results[0].id, waitSeconds: 0 })).reply, 'One answer');
+    }
+  } finally { store.close(); }
 });

@@ -8,6 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createCallServer } from '../server.mjs';
 import { demoSessions } from '../demo.mjs';
 import { mcpClient } from './mcp-helper.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ManagedCalls } from '../managed-calls.mjs';
+import { AcpClient } from '../acp-client.mjs';
 
 const home = await mkdtemp(join(tmpdir(), 'critter-browser-test-'));
 let app;
@@ -68,6 +71,9 @@ try {
   const executable = process.env.CRITTER_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   await access(executable);
   app = createCallServer({ home, storePath: join(home, 'critter-call', 'bridge.db'),
+    managedFactory: options => new ManagedCalls({ ...options, runtimeFactory: config => new AcpClient({
+      ...config, command: process.execPath, args: [fileURLToPath(new URL('./acp-fixture.mjs', import.meta.url))],
+    }) }),
     source: { async snapshot() { return { sessions: fixtureState.sessions, warnings: [] }; } } });
   const origin = await app.listen(0);
   const profile = join(home, 'browser-profile');
@@ -91,7 +97,20 @@ try {
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
   await cdp.call('Page.navigate', { url: `${origin}/?demo=1` });
   await waitFor("document.querySelectorAll('.tile').length === 12", '12 demo participants');
+  assert.equal(await cdp.evaluate("document.getElementById('room-title')"), null, 'Decorative workshop heading no longer uses vertical space');
+  assert.equal(await cdp.evaluate("document.getElementById('new-call').hidden"), true, 'Demo cannot start real agents');
   assert.equal(await cdp.evaluate("document.querySelectorAll('.tile.hand').length"), 3);
+  assert.equal(await cdp.evaluate("document.querySelector('.tile .session-name').textContent"), demoSessions()[0].title);
+  assert.equal(await cdp.evaluate("document.querySelector('.tile .critter-badge').textContent"), demoSessions()[0].name);
+  assert.equal(await cdp.evaluate("document.getElementById('conversation-title').textContent"), demoSessions()[0].title);
+  assert.equal(await cdp.evaluate("document.getElementById('selected-title').textContent"), demoSessions()[0].name);
+  assert.ok(await cdp.evaluate(`(() => {
+    const tile = document.querySelector('.tile.hand');
+    const style = getComputedStyle(tile);
+    return style.borderTopColor === 'rgb(255, 179, 71)'
+      && style.animationName === 'hand-glow'
+      && getComputedStyle(tile.querySelector('.hand-badge')).animationName === 'hand-wave';
+  })()`), 'Raised hands retain an orange border and animated glow/badge even when selected');
   assert.equal(await cdp.evaluate("document.getElementById('source-badge').textContent"), 'Demo bridge');
   await waitFor("[...document.querySelectorAll('.tile .scene-layer')].every(image => image.complete && image.naturalWidth > 0)", 'all SVG character layers render');
   assert.equal(await cdp.evaluate("document.querySelectorAll('.tile .scene-layer').length"), 36);
@@ -147,17 +166,19 @@ try {
   await waitFor("window.audioEvents.some(event => event.kind === 'bell' && event.event === 'start')", 'new hand plays notification bell');
   assert.equal(await cdp.evaluate("!!document.querySelector('.tile.speaking')"), false, 'Bell does not animate speech');
   await waitFor("window.audioEvents.some(event => event.kind === 'voice' && event.event === 'start')", 'agent name follows bell', 15000);
-  assert.ok(await cdp.evaluate(`(() => {
+  const bellSequence = await cdp.evaluate(`(() => {
     const bell = window.audioEvents.find(event => event.kind === 'bell' && event.event === 'end');
     const start = window.audioEvents.find(event => event.kind === 'bell' && event.event === 'start');
     const voice = window.audioEvents.find(event => event.kind === 'voice' && event.event === 'start');
-    return !!bell && voice.at >= start.at + start.metric.duration * 1000 - 50 && start.rate === 1;
-  })()`), 'Bell finishes before the deterministic agent voice begins');
+    return { bell, start, voice };
+  })()`);
+  assert.ok(bellSequence.bell && bellSequence.voice.at >= bellSequence.start.at + bellSequence.start.metric.duration * 1000 - 50
+    && bellSequence.start.rate === 1, `Bell finishes before the deterministic agent voice begins: ${JSON.stringify(bellSequence)}`);
   assert.equal(await cdp.evaluate("document.querySelectorAll('.spoken-excerpt').length"), 0, 'Announcing a name does not highlight unrelated transcript text');
   const announced = await cdp.evaluate(`(async () => {
     const { voiceFromHash } = await import('/audio.mjs');
     const tile = document.querySelector('.tile.selected');
-    const name = tile.querySelector('.tile-name').textContent;
+    const name = tile.querySelector('.critter-badge').textContent;
     return { name, hash: tile.querySelector('.character-scene').dataset.hash,
       rate: window.playedAudio.at(-1).playbackRate,
       duration: window.playedAudio.at(-1).duration,
@@ -171,9 +192,15 @@ try {
   await delay(2200);
   assert.equal(await cdp.evaluate('window.playedAudio.length'), alertCount, 'Polling does not repeat a hand notification');
   assert.ok(await cdp.evaluate("document.querySelectorAll('.tile')[4] === window.unchangedTile"), 'Unchanged cards retain their DOM and animation across polls');
+  await cdp.evaluate("document.getElementById('demo-hand').click()");
+  await delay(2200);
+  assert.equal(await cdp.evaluate('window.playedAudio.length'), alertCount, 'Raising the same pending hand does not replay its notification');
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B Hand raised');
+  assert.equal((await (await fetch(`${origin}/api/snapshot?room=demo`)).json()).requests.length, 4);
   assert.equal(await cdp.evaluate("document.querySelector('.tile .character-scene').dataset.hash"), firstArtwork, 'Character identity survives refresh');
   await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   assert.ok(await cdp.evaluate("[...document.querySelectorAll('.scene-layer')].every(node => getComputedStyle(node).animationName === 'none')"), 'Reduced motion disables character animation');
+  assert.ok(await cdp.evaluate("[...document.querySelectorAll('.tile.hand, .hand-badge')].every(node => getComputedStyle(node).animationName === 'none')"), 'Reduced motion disables hand glows and waving badges too');
   await cdp.call('Emulation.setEmulatedMedia', { features: [] });
   await cdp.evaluate("document.querySelector('.tile').click()");
   await cdp.evaluate(`document.getElementById('sound').value = 'off';
@@ -202,9 +229,20 @@ try {
   const lastSentences = 'Use the local scope. The checks are ready. Which scope should I use?';
   const fullMessage = `Earlier context. An older update. ${lastSentences}`;
   const hand = await client.call('raise_hand', { sessionId, message: fullMessage, kind: 'context', agentName: 'Scope helper' });
+  for (let index = 0; index < 5; index++) {
+    assert.equal((await client.call('raise_hand', { sessionId, message: fullMessage, kind: 'context', agentName: 'Scope helper' })).id, hand.id);
+  }
   await cdp.call('Page.navigate', { url: origin });
   await waitFor("document.getElementById('source-badge').textContent === 'Reply bridge'", 'real stdio bridge hand appears');
+  const renamedTitle = 'A renamed Copilot session with a descriptive title';
+  fixtureState.sessions[0].title = renamedTitle;
+  await waitFor("document.querySelector('.tile.selected .session-name')?.textContent === " + JSON.stringify(renamedTitle), 'session rename updates the primary card label');
+  assert.equal(await cdp.evaluate("document.getElementById('conversation-title').textContent"), renamedTitle);
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .critter-badge').textContent"), demoSessions()[0].name);
   assert.equal(await cdp.evaluate("document.querySelector('.message.active .message-text').textContent"), fullMessage);
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B Hand raised');
+  assert.equal(await cdp.evaluate("document.getElementById('hand-count').textContent"), '1 hand raised');
+  assert.equal(await cdp.evaluate("document.getElementById('request-picker').hidden"), true);
   await cdp.evaluate("document.querySelector('.tile').click()");
   await waitFor("document.querySelector('.spoken-excerpt')?.textContent === " + JSON.stringify(lastSentences), 'only the last three sentences receive subtle highlighting');
   const firstWord = await cdp.evaluate("document.querySelector('.spoken-word')?.textContent");
@@ -222,6 +260,7 @@ try {
   const second = await client.call('raise_hand', { sessionId, message: 'Question two', agentName: 'Helper two' });
   const third = await client.call('raise_hand', { sessionId, message: 'Question three', agentName: 'Helper three' });
   await waitFor("document.querySelectorAll('#request-picker button').length === 2", 'multiple concurrent hands arrive');
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B 2 hands');
   await cdp.evaluate(`var reply = document.getElementById('reply'); reply.value = 'Draft for two'; reply.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelectorAll('#request-picker button')[1].click();`);
   assert.equal(await cdp.evaluate("document.getElementById('reply').value"), '');
@@ -235,10 +274,26 @@ try {
   await cdp.evaluate("document.getElementById('dismiss').click()");
   await waitFor("document.getElementById('send').textContent.includes('Copy for Copilot')", 'dismissed hand returns to observer mode');
   assert.equal((await client.call('get_reply', { requestId: third.id, waitSeconds: 0 })).status, 'dismissed');
+  fixtureState.sessions[0].messages = [
+    { id: 'native-context-one', kind: 'context', message: 'First native question', createdAt: new Date().toISOString() },
+    { id: 'native-context-two', kind: 'context', message: 'Second native question', createdAt: new Date().toISOString() },
+    { id: 'native-update', kind: 'update', message: 'An unread update', createdAt: new Date().toISOString() },
+  ];
+  await waitFor("document.querySelector('.tile.selected .hand-badge')?.textContent === '\u270B Hand raised'", 'multiple native messages count as one parent hand');
+  assert.equal(await cdp.evaluate("document.getElementById('hand-count').textContent"), '1 hand raised');
+  const parent = await client.call('raise_hand', { sessionId, message: 'Parent bridge question' });
+  await waitFor("document.querySelector('.message.active .message-text')?.textContent === 'Parent bridge question'", 'parent bridge hand arrives alongside native history');
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B Hand raised');
+  assert.equal(await cdp.evaluate("document.getElementById('hand-count').textContent"), '1 hand raised');
+  fixtureState.sessions[0].messages = [];
+  await cdp.evaluate("document.getElementById('dismiss').click()");
+  await waitFor("document.getElementById('hand-count').textContent === 'No hands raised'", 'clearing the one parent hand removes its badge');
+  assert.equal((await client.call('get_reply', { requestId: parent.id, waitSeconds: 0 })).status, 'dismissed');
   await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true, button: 2, clientX: innerWidth - 5, clientY: innerHeight - 5
   }));`);
   assert.equal(await cdp.evaluate("document.getElementById('session-menu').hidden"), false);
+  assert.equal(await cdp.evaluate("document.getElementById('menu-title').textContent"), renamedTitle);
   assert.ok(await cdp.evaluate(`(() => {
     const bounds = document.getElementById('session-menu').getBoundingClientRect();
     return bounds.right <= innerWidth && bounds.bottom <= innerHeight;
@@ -249,14 +304,226 @@ try {
   assert.equal(JSON.parse(await readFile(trackerPath, 'utf8')).sessions[sessionId].state, 'resolved');
   await cdp.evaluate("document.querySelector('#session-views [data-view=\"resolved\"]').click()");
   await waitFor("document.querySelectorAll('.tile').length === 1 && document.querySelector('.tile').dataset.id === " + JSON.stringify(sessionId), 'resolved call appears in Out to play');
+  assert.equal(await cdp.evaluate("document.getElementById('show-playground').hidden"), false);
+  assert.equal(await cdp.evaluate("document.getElementById('playground').hidden"), true, 'Playground is opt-in');
+  fixtureState.sessions[0].messages = [{ id: 'playground-recap', kind: 'update', message: 'Together we fixed the timer race and added regression coverage.' }];
+  await cdp.evaluate("document.getElementById('show-playground').click()");
+  await waitFor("!document.getElementById('playground').hidden && document.querySelectorAll('.playground-critter').length === 1", 'resolved critter enters the playground');
+  assert.equal(await cdp.evaluate("document.getElementById('grid').hidden"), true);
+  await waitFor("document.querySelector('.playground-body').complete && document.querySelector('.playground-body').naturalWidth > 0", 'playground uses the existing character artwork');
+  assert.equal(await cdp.evaluate("document.querySelector('.playground-critter').dataset.hash"),
+    await cdp.evaluate("document.querySelector('.tile .character-scene').dataset.hash"));
+  const initialPosition = await cdp.evaluate("document.querySelector('.playground-critter').style.cssText");
+  await waitFor("document.querySelector('.playground-critter').classList.contains('walking') && document.querySelector('.playground-critter').style.cssText !== " + JSON.stringify(initialPosition), 'critter wanders along the garden');
+  await cdp.evaluate("window.playgroundButton = document.querySelector('.playground-critter')");
+  await delay(2200);
+  assert.equal(await cdp.evaluate("document.querySelector('.playground-critter') === window.playgroundButton"), true, 'polling preserves roaming sprites');
+  await cdp.evaluate("document.querySelector('.playground-critter').dispatchEvent(new PointerEvent('pointerenter'))");
+  await waitFor("!document.getElementById('playground-card').hidden && document.getElementById('playground-card').textContent.includes('Together we fixed the timer race')", 'hover card shows the recorded collaboration recap');
+  assert.equal(await cdp.evaluate("document.querySelector('.playground-thread').textContent"), renamedTitle);
+  const heldPosition = await cdp.evaluate("document.querySelector('.playground-critter').style.translate");
+  await delay(300);
+  assert.equal(await cdp.evaluate("document.querySelector('.playground-critter').style.translate"), heldPosition, 'inspected critter holds still');
+  await cdp.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await cdp.evaluate("document.querySelector('.playground-critter').dispatchEvent(new PointerEvent('pointerleave')); document.querySelector('.playground-critter').blur(); document.querySelector('.playground-critter').focus()");
+  assert.equal(await cdp.evaluate("document.getElementById('playground-card').hidden"), false, 'keyboard focus shows the same card');
+  await cdp.evaluate("document.querySelector('.playground-critter').click()");
+  assert.equal(await cdp.evaluate("document.getElementById('conversation-title').textContent"), renamedTitle);
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await cdp.evaluate("document.querySelector('.playground-critter').blur(); document.querySelector('.playground-critter').focus()");
+  assert.ok(await cdp.evaluate(`(() => {
+    const card = document.getElementById('playground-card').getBoundingClientRect();
+    const stage = document.querySelector('.playground-stage').getBoundingClientRect();
+    return card.left >= stage.left && card.right <= stage.right && card.top >= stage.top && card.bottom <= stage.bottom
+      && document.documentElement.scrollWidth <= innerWidth;
+  })()`), 'playground and hover card stay inside the mobile viewport');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
+  await cdp.evaluate("document.querySelector('.playground-critter').blur()");
+  await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await waitFor("document.getElementById('playground').dataset.motion === 'paused'", 'reduced-motion preference pauses the playground');
+  const stillPosition = await cdp.evaluate("document.querySelector('.playground-critter').style.cssText");
+  await delay(300);
+  assert.equal(await cdp.evaluate("document.getElementById('playground').dataset.motion"), 'paused');
+  assert.equal(await cdp.evaluate("document.querySelector('.playground-critter').style.cssText"), stillPosition, 'reduced motion stops roaming, not just CSS animation');
+  await cdp.call('Emulation.setEmulatedMedia', { features: [] });
+  await cdp.call('Page.reload');
+  await waitFor("!document.getElementById('playground').hidden && document.querySelectorAll('.playground-critter').length === 1", 'playground preference survives reload');
+  if (process.env.CRITTER_SCREENSHOT) {
+    const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+    await writeFile(process.env.CRITTER_SCREENSHOT.replace(/\.png$/i, '-playground.png'), Buffer.from(screenshot.data, 'base64'));
+  }
+  const encounter = await cdp.evaluate(`(async () => {
+    const { Playground } = await import('/playground.mjs');
+    const { characterFromText } = await import('/characters.mjs');
+    const root = document.createElement('section');
+    root.className = 'playground';
+    root.innerHTML = '<div class="playground-stage"><canvas width="480" height="300"></canvas><div class="playground-sprites"></div><div class="playground-card" id="encounter-card" hidden></div></div><p class="playground-caption"></p>';
+    document.querySelector('.meeting').append(root);
+    const widget = new Playground(root, { select() {}, menu() {} });
+    const sessions = [{ id: 'friend-a', name: 'Friend A', title: 'A', messages: [] },
+      { id: 'friend-b', name: 'Friend B', title: 'B', messages: [] }];
+    const art = await characterFromText('friend');
+    const assets = new Map(sessions.map(session => [session.id, { hash: art.hash,
+      urls: { character: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(art.layers.character) } }]));
+    widget.update(sessions, assets);
+    const [one, two] = widget.world.agents.values();
+    Object.assign(one, { x: 210, y: 162, pause: 1 });
+    Object.assign(two, { x: 228, y: 162, pause: 1 });
+    widget.world.tick(.01);
+    widget.paint();
+    const result = [...root.querySelectorAll('.playground-critter')].map(button => ({
+      heart: !button.querySelector('.playground-heart').hidden,
+      squish: getComputedStyle(button.querySelector('img')).animationName,
+    }));
+    widget.destroy();
+    root.remove();
+    return result;
+  })()`);
+  assert.deepEqual(encounter, [{ heart: true, squish: 'playground-squish' }, { heart: true, squish: 'playground-squish' }]);
+  await cdp.evaluate(`(async () => {
+    const { Playground, ACTIVITIES } = await import('/playground.mjs');
+    const { characterFromText } = await import('/characters.mjs');
+    const root = document.createElement('section');
+    root.id = 'activity-fixture';
+    root.className = 'playground';
+    root.innerHTML = '<div class="playground-stage"><canvas width="480" height="300"></canvas><div class="playground-sprites"></div><div class="playground-card" id="activity-card" hidden></div></div><p class="playground-caption"></p>';
+    document.querySelector('.meeting').append(root);
+    const widget = new Playground(root, { select() {}, menu() {} });
+    const sessions = ['boat', 'swing', 'slide', 'bubbles', 'boat-waiter'].map(id => ({
+      id, name: id, title: 'Activity check: ' + id, messages: [],
+    }));
+    const assets = new Map(await Promise.all(sessions.map(async session => {
+      const art = await characterFromText(session.id);
+      return [session.id, { hash: art.hash, urls: {
+        character: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(art.layers.character),
+      } }];
+    })));
+    widget.update(sessions, assets);
+    const choices = [0, .3, .6, .9, 0];
+    widget.world.random = () => choices.shift() ?? .3;
+    for (const [index, agent] of [...widget.world.agents.values()].entries()) {
+      Object.assign(agent, index < 4 ? ACTIVITIES[sessions[index].id].entry : { x: 186, y: 186 });
+      agent.activityWait = 0;
+    }
+    const originalTick = widget.world.tick.bind(widget.world);
+    const originalPaint = widget.paint.bind(widget);
+    const observation = { ticks: 0, using: new Set(), bubbles: false, seated: false, sliding: false, swing: false };
+    widget.world.tick = dt => { observation.ticks++; originalTick(dt); };
+    widget.paint = () => {
+      originalPaint();
+      for (const button of root.querySelectorAll('.playground-critter[data-phase="using"]')) {
+        observation.using.add(button.dataset.activity);
+        if (button.dataset.activity === 'bubbles') {
+          const particles = [...button.querySelectorAll('.playground-bubbles i')];
+          observation.bubbles = !button.querySelector('.playground-bubbles').hidden && particles.length === 5
+            && particles.every(particle => getComputedStyle(particle).animationName === 'playground-bubble');
+        }
+        if (button.dataset.activity === 'boat') observation.seated =
+          Number(root.querySelector('.playground-boat').style.zIndex) < Number(button.style.zIndex)
+          && Number(root.querySelector('.playground-boat-rim').style.zIndex) > Number(button.style.zIndex);
+        if (button.dataset.activity === 'slide') observation.sliding = new DOMMatrix(getComputedStyle(button.querySelector('img')).transform).b !== 0;
+      }
+      if (widget.world.swingAngle) observation.swing = root.querySelector('.playground-swing').style.rotate !== '0rad';
+    };
+    window.activityFixture = { widget, root, observation };
+  })()`);
+  await delay(250);
+  assert.equal(await cdp.evaluate('window.activityFixture.observation.ticks'), 0, 'equipment simulation does not run before enabling Playground');
+  assert.equal(await cdp.evaluate("!!document.querySelector('#activity-fixture .playground-boat')"), false, 'equipment drawing is lazy');
+  assert.equal(await cdp.evaluate("[...window.activityFixture.widget.world.agents.values()].some(agent => !!agent.activity)"), false);
+  await cdp.evaluate('window.activityFixture.widget.setActive(true)');
+  await waitFor("window.activityFixture.observation.using.size === 4 && window.activityFixture.observation.swing", 'all four equipment activities run in the real renderer');
+  assert.ok(await cdp.evaluate('window.activityFixture.observation.bubbles && window.activityFixture.observation.seated && window.activityFixture.observation.sliding'));
+  assert.equal(await cdp.evaluate("window.activityFixture.widget.world.stations.get('boat').queue.length"), 1, 'second sailor waits in line');
+  await waitFor("[...document.querySelectorAll('#activity-fixture .playground-boat, #activity-fixture .playground-swing')].every(image => image.complete && image.naturalWidth > 0)", 'original equipment artwork renders');
+  if (process.env.CRITTER_SCREENSHOT) {
+    const box = await cdp.evaluate(`(() => {
+      const rect = document.getElementById('activity-fixture').getBoundingClientRect();
+      return {x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height, scale: 1};
+    })()`);
+    const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: box });
+    await writeFile(process.env.CRITTER_SCREENSHOT.replace(/\.png$/i, '-activities.png'), Buffer.from(screenshot.data, 'base64'));
+  }
+  const rateStart = await cdp.evaluate('({ticks: activityFixture.observation.ticks, time: performance.now(), nodes: activityFixture.root.querySelectorAll("*").length})');
+  await delay(600);
+  const rateEnd = await cdp.evaluate('({ticks: activityFixture.observation.ticks, time: performance.now(), nodes: activityFixture.root.querySelectorAll("*").length})');
+  assert.equal(rateEnd.nodes, rateStart.nodes, 'active effects reuse a fixed DOM pool');
+  assert.ok(rateEnd.ticks - rateStart.ticks <= Math.ceil((rateEnd.time - rateStart.time) * 35 / 1000) + 2,
+    'one shared simulation loop stays near its 30 fps budget');
+  await cdp.evaluate('window.activityFixture.widget.setActive(false)');
+  const pausedActivities = await cdp.evaluate(`JSON.stringify({
+    ticks: activityFixture.observation.ticks, boat: activityFixture.widget.world.boat,
+    actors: [...activityFixture.widget.world.agents.values()], nodes: activityFixture.root.querySelectorAll('*').length,
+  })`);
+  await delay(300);
+  assert.equal(await cdp.evaluate(`JSON.stringify({
+    ticks: activityFixture.observation.ticks, boat: activityFixture.widget.world.boat,
+    actors: [...activityFixture.widget.world.agents.values()], nodes: activityFixture.root.querySelectorAll('*').length,
+  })`), pausedActivities, 'disabled Playground freezes timers, queues, boat voyages, and bounded effect nodes');
+  assert.ok(await cdp.evaluate("[...document.querySelectorAll('#activity-fixture .playground-bubbles i')].every(particle => getComputedStyle(particle).animationPlayState === 'paused')"), 'CSS effects pause too');
+  await cdp.evaluate('window.activityFixture.widget.setActive(true)');
+  await waitFor('window.activityFixture.observation.ticks > ' + JSON.parse(pausedActivities).ticks, 're-enabling resumes the existing activities');
+  await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  await waitFor("document.getElementById('activity-fixture').dataset.motion === 'paused'", 'reduced-motion stops equipment');
+  const reducedTicks = await cdp.evaluate('activityFixture.observation.ticks');
+  await delay(250);
+  assert.equal(await cdp.evaluate('activityFixture.observation.ticks'), reducedTicks);
+  await cdp.call('Emulation.setEmulatedMedia', { features: [] });
+  await cdp.call('Emulation.setFocusEmulationEnabled', { enabled: false });
+  const background = await cdp.call('Target.createTarget', { url: 'about:blank' });
+  const backgroundTabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+  const backgroundPage = new DevTools(backgroundTabs.find(tab => tab.id === background.targetId).webSocketDebuggerUrl);
+  try {
+    await backgroundPage.call('Page.bringToFront');
+    await waitFor("document.hidden && document.getElementById('activity-fixture').dataset.motion === 'paused'", 'background tab stops all equipment simulation');
+    const hiddenTicks = await cdp.evaluate('activityFixture.observation.ticks');
+    await delay(250);
+    assert.equal(await cdp.evaluate('activityFixture.observation.ticks'), hiddenTicks);
+    await cdp.call('Page.bringToFront');
+    await waitFor("!document.hidden && document.getElementById('activity-fixture').dataset.motion === 'running'", 'foreground tab resumes equipment');
+  } finally {
+    await cdp.call('Target.closeTarget', { targetId: background.targetId });
+    backgroundPage.socket.close();
+  }
+  await cdp.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await cdp.evaluate('activityFixture.widget.destroy(); activityFixture.root.remove(); delete window.activityFixture; window.scrollTo(0, 0)');
+  await cdp.evaluate(`document.querySelector('.playground-critter').dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'F10', shiftKey: true, bubbles: true, cancelable: true
+  })); document.getElementById('session-menu').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));`);
+  assert.equal(await cdp.evaluate("document.activeElement.classList.contains('playground-critter')"), true, 'context-menu Escape restores sprite focus');
+  await cdp.evaluate("document.getElementById('show-playground').click()");
+  assert.equal(await cdp.evaluate("document.getElementById('playground').dataset.motion"), 'paused');
+  assert.equal(await cdp.evaluate("document.getElementById('playground').hidden"), true);
+  assert.equal(await cdp.evaluate("document.getElementById('grid').hidden"), false);
+  fixtureState.sessions[0].messages = [];
+  await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100
+  }));`);
+  assert.equal(await cdp.evaluate("document.querySelector('#session-menu [data-state=\"in-room\"]').textContent"), 'Pin');
+  assert.equal(await cdp.evaluate("document.querySelector('#session-menu [data-state=\"in-room\"]').hidden"), false);
+  await cdp.evaluate("document.querySelector('#session-menu [data-state=\"in-room\"]').click()");
+  await waitFor("document.getElementById('resolved-count').textContent === '0'", 'Pin restores a call from Out to play');
+  await cdp.evaluate("document.querySelector('#session-views [data-view=\"in-room\"]').click()");
+  await waitFor("document.querySelectorAll('.tile').length === 12", 'pinned resolved call returns to room');
+  await cdp.evaluate(`document.querySelector('.tile[data-id="${sessionId}"]').dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100
+  })); document.querySelector('#session-menu [data-state="resolved"]').click();`);
+  await waitFor("document.getElementById('resolved-count').textContent === '1'", 'pinned call can be resolved again');
+  await cdp.evaluate("document.querySelector('#session-views [data-view=\"resolved\"]').click()");
+  await waitFor("document.querySelectorAll('.tile').length === 1", 'resolved view repopulates');
   await cdp.call('Page.reload');
   await waitFor("document.querySelector('#session-views [data-view=\"resolved\"]').getAttribute('aria-pressed') === 'true' && document.querySelectorAll('.tile').length === 1", 'Out to play and resolved state survive reload');
-  await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new MouseEvent('contextmenu', {
+  await cdp.evaluate("document.getElementById('show-playground').click()");
+  await waitFor("!document.getElementById('playground').hidden && document.querySelectorAll('.playground-critter').length === 1", 'restored critter can return to the playground');
+  await cdp.evaluate(`document.querySelector('.playground-critter').dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100
   })); document.querySelector('#session-menu [data-state="archived"]').click();`);
   await waitFor("document.getElementById('archived-count').textContent === '1' && document.querySelectorAll('.tile').length === 0", 'resolved call moves to Archived');
+  assert.equal(await cdp.evaluate("document.querySelectorAll('.playground-critter').length"), 0, 'archiving immediately removes its roaming critter');
+  assert.equal(await cdp.evaluate("document.getElementById('playground').dataset.motion"), 'paused', 'empty playground does not animate');
   await cdp.evaluate("document.querySelector('#session-views [data-view=\"archived\"]').click()");
   await waitFor("document.querySelectorAll('.tile').length === 1", 'archived calls remain accessible');
+  assert.equal(await cdp.evaluate("document.getElementById('show-playground').hidden && document.getElementById('playground').hidden"), true, 'playground is only available in Out to play');
   await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new KeyboardEvent('keydown', {
     key: 'F10', shiftKey: true, bubbles: true, cancelable: true
   }));`);
@@ -267,16 +534,59 @@ try {
   assert.equal(await cdp.evaluate("document.activeElement?.classList.contains('tile')"), true);
   await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new KeyboardEvent('keydown', {
     key: 'F10', shiftKey: true, bubbles: true, cancelable: true
-  })); document.querySelector('#session-menu [data-state="in-room"]').click();`);
+  }));`);
+  assert.equal(await cdp.evaluate("document.querySelector('#session-menu [data-state=\"in-room\"]').textContent"), 'Pin');
+  await cdp.evaluate('document.querySelector(\'#session-menu [data-state="in-room"]\').click()');
   await waitFor("document.getElementById('archived-count').textContent === '0'", 'archived call restores to the room');
   await cdp.evaluate("document.querySelector('#session-views [data-view=\"in-room\"]').click()");
   await waitFor("document.querySelectorAll('.tile').length === 12", 'restored call rejoins the room');
   assert.equal(JSON.parse(await readFile(trackerPath, 'utf8')).sessions[sessionId].state, 'in-room');
+  assert.equal(await cdp.evaluate(`document.querySelector('.tile[data-id="${sessionId}"] .pin-badge').textContent`), 'Pinned', 'Pinned calls are visibly marked');
   fixtureState.sessions = [];
   await waitFor("document.querySelectorAll('.tile').length === 0 && !document.getElementById('empty').hidden", 'room empties after sessions disappear');
   assert.equal(await cdp.evaluate("document.getElementById('conversation-title').textContent"), 'A seat for everyone.');
   assert.equal(await cdp.evaluate("document.getElementById('transcript').children.length"), 0);
   assert.equal(await cdp.evaluate("document.getElementById('reply').disabled"), true);
+  await cdp.evaluate("document.getElementById('new-call').click()");
+  assert.equal(await cdp.evaluate("document.getElementById('unlock-dialog').open"), true, 'New call requires local control access');
+  await cdp.evaluate(`document.getElementById('control-key').value = ${JSON.stringify(app.controlKey)};
+    document.getElementById('unlock-form').requestSubmit();`);
+  await waitFor("document.getElementById('new-call-dialog').open", 'control-key unlock continues to New call');
+  await cdp.evaluate(`document.getElementById('call-folder').value = ${JSON.stringify(home)};
+    document.getElementById('call-label').value = 'Browser managed call';
+    document.getElementById('call-message').value = 'Request permission';
+    document.getElementById('new-call-form').requestSubmit();`);
+  await waitFor("document.getElementById('conversation-title').textContent === 'Browser managed call' && !!document.querySelector('.permission')", 'new real-protocol managed call shows its permission request');
+  assert.equal(await cdp.evaluate("document.getElementById('source-badge').textContent"), 'Managed call');
+  assert.ok(await cdp.evaluate("document.querySelector('.permission pre').textContent.includes('Write fixture.txt')"));
+  assert.ok(await cdp.evaluate("document.getElementById('send').textContent.includes('Queue message')"));
+  await cdp.evaluate(`document.getElementById('reply').value = 'Queued browser follow-up';
+    document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('reply-form').requestSubmit();`);
+  await waitFor("document.querySelectorAll('.queued-message').length === 1", 'message is durably queued behind permission-blocked active turn');
+  await cdp.evaluate("[...document.querySelectorAll('.permission button')].find(button => button.textContent === 'Deny once').click()");
+  await waitFor("[...document.querySelectorAll('.message-text')].some(node => node.textContent === 'Fixture response: Queued browser follow-up')", 'denied operation settles and queued follow-up executes');
+  await waitFor("document.getElementById('send').textContent.includes('Send message')", 'idle managed session allows unsolicited send');
+  await cdp.evaluate(`document.getElementById('reply').value = 'Third browser turn';
+    document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('reply-form').requestSubmit();`);
+  await waitFor("[...document.querySelectorAll('.message-text')].some(node => node.textContent === 'Fixture response: Third browser turn')", 'unsolicited third turn requires no bridge hand');
+  await cdp.evaluate('window.confirm = () => true');
+  await cdp.evaluate("[...document.querySelectorAll('#managed-panel button')].find(button => button.textContent === 'Release to Copilot').click()");
+  await waitFor("document.getElementById('send').textContent.includes('Copy for Copilot')", 'release makes managed session history-only');
+  await cdp.call('Page.navigate', { url: pathToFileURL(join(home, 'critter-call', 'open-controls.html')).href });
+  try {
+    await waitFor("location.origin === " + JSON.stringify(origin)
+      + " && location.hash === '' && document.getElementById('unlock-controls')?.hidden", 'local launcher unlocks controls and removes the secret URL fragment');
+  } catch (error) {
+    const page = await cdp.evaluate(`({origin: location.origin, path: location.pathname, hasFragment: !!location.hash,
+      title: document.title, warning: document.getElementById('warnings')?.textContent,
+      unlockHidden: document.getElementById('unlock-controls')?.hidden})`);
+    throw new Error(error.message + ': ' + JSON.stringify(page));
+  }
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert.ok(await cdp.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'New controls and compact header fit on mobile');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
   await cdp.call('Page.navigate', { url: `${origin}/character-lab` });
   await waitFor("!!document.getElementById('seed-hash')?.textContent.match(/[a-f0-9]{64}/)", 'character lab renders a seed');
   await waitFor("document.querySelectorAll('#character-stage img').length === 3 && [...document.querySelectorAll('#character-stage img')].every(image => image.complete && image.naturalWidth)", 'lab shows three valid SVG layers');
@@ -356,7 +666,7 @@ try {
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.ok(await cdp.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile lab does not overflow horizontally');
   assert.deepEqual(errors, [], 'No unhandled browser exceptions');
-  console.log('Browser checks passed: layered characters and motion, first-click-only audio, bell then seeded agent name, three-sentence highlights, MCP replies, lifecycle persistence, mobile layouts, and character lab hash/overrides/API/preview.');
+  console.log('Browser checks passed: compact header, characters/audio, MCP replies, lifecycle/Pin, pixel playground, equipment queues/rides/bubbles and pause lifecycle, local control unlock, ACP New Call, permission denial, queued/direct messages, release, mobile layouts, and character lab.');
 } finally {
   await client?.close();
   if (cdp && !browserExited) {

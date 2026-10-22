@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile, appendFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -24,7 +24,8 @@ async function catalog(home, count = 16) {
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, summary TEXT, repository TEXT, cwd TEXT, updated_at TEXT)');
   for (let index = 1; index <= count; index++) {
     db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)')
-      .run(uuid(index), `Task ${index}`, 'local/workshop', 'C:\\workshop', `2026-10-${String(index).padStart(2, '0')}T12:00:00Z`);
+      .run(uuid(index), `Task ${index}`, 'local/workshop', 'C:\\workshop',
+        new Date(Date.now() - (count - index + 1) * 60000).toISOString());
     const dir = join(home, 'session-state', uuid(index));
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'events.jsonl'), JSON.stringify(event('assistant.message', { content: `Update ${index}` })) + '\n');
@@ -69,6 +70,64 @@ test('bridge rejects invalid IDs, empty or oversized text, and invalid hand type
     assert.throws(() => store.raise({ sessionId: uuid(1), message: 'x', kind: 'approval' }), /Unknown/);
     assert.throws(() => store.get(undefined), /UUID/);
     assert.throws(() => store.get(uuid(1)), /no longer exists/);
+  } finally { store.close(); }
+});
+
+test('one pending hand per agent keeps its ID and latest message until answered or dismissed', async t => {
+  const home = await fixture(t);
+  const path = join(home, 'bridge.db');
+  const firstClient = new BridgeStore(path);
+  const secondClient = new BridgeStore(path);
+  try {
+    const input = { sessionId: uuid(1), message: 'First question', agentName: 'Scope helper' };
+    const first = firstClient.raise(input);
+    for (let index = 0; index < 5; index++) {
+      const repeated = secondClient.raise({ ...input, message: `Latest context ${index}`, kind: 'context' });
+      assert.equal(repeated.id, first.id);
+      assert.equal(repeated.createdAt, first.createdAt);
+      assert.equal(repeated.message, `Latest context ${index}`);
+      assert.equal(repeated.kind, 'context');
+    }
+    assert.equal(firstClient.list().filter(row => row.status === 'pending').length, 1);
+    const parent = firstClient.raise({ sessionId: uuid(1), message: 'Parent question' });
+    const otherAgent = firstClient.raise({ ...input, agentName: 'Other helper' });
+    const otherSession = firstClient.raise({ ...input, sessionId: uuid(2) });
+    assert.equal(new Set([first.id, parent.id, otherAgent.id, otherSession.id]).size, 4);
+    firstClient.reply(first.id, 'Here is the context');
+    const next = secondClient.raise(input);
+    assert.notEqual(next.id, first.id);
+    assert.throws(() => firstClient.reply(first.id, 'Stale reply'), /already answered/);
+    assert.equal(firstClient.get(next.id).status, 'pending');
+    secondClient.dismiss(next.id);
+    assert.notEqual(secondClient.raise(input).id, next.id);
+    assert.equal(firstClient.get(parent.id).status, 'pending');
+    assert.equal(firstClient.get(otherAgent.id).status, 'pending');
+  } finally {
+    firstClient.close();
+    secondClient.close();
+  }
+});
+
+test('legacy duplicate hands share a reply or dismissal without losing old waiter IDs', () => {
+  const store = new BridgeStore(':memory:');
+  try {
+    const insert = store.db.prepare(`INSERT INTO requests (id, session_id, agent_name, kind, message, created_at)
+      VALUES (?, ?, ?, 'question', ?, ?)`);
+    for (const index of [1, 2, 3]) {
+      insert.run(uuid(index + 100), uuid(1), 'Legacy helper', `Old question ${index}`, `2026-10-20T12:00:0${index}Z`);
+    }
+    const other = store.raise({ sessionId: uuid(1), message: 'Separate question', agentName: 'Other helper' });
+    const repeated = store.raise({ sessionId: uuid(1), message: 'Latest question', agentName: 'Legacy helper' });
+    assert.equal(repeated.id, uuid(101));
+    assert.equal(repeated.message, 'Latest question');
+    store.reply(repeated.id, 'One answer to this hand');
+    for (const index of [1, 2, 3]) assert.equal(store.get(uuid(index + 100)).reply, 'One answer to this hand');
+    assert.equal(store.get(other.id).status, 'pending');
+    insert.run(uuid(104), uuid(2), null, 'Old parent question', '2026-10-20T12:00:04Z');
+    insert.run(uuid(105), uuid(2), null, 'Another parent question', '2026-10-20T12:00:05Z');
+    store.dismiss(uuid(105));
+    assert.equal(store.get(uuid(104)).status, 'dismissed');
+    assert.equal(store.get(uuid(105)).status, 'dismissed');
   } finally { store.close(); }
 });
 
@@ -131,6 +190,38 @@ test('desktop catalog titles merge with history, while desktop archives stay exc
   assert.equal(result.sessions.length, 1);
   assert.equal(result.sessions[0].title, 'Named in the app');
   assert.equal(result.sessions[0].repository, 'local/workshop');
+});
+
+test('workspace session names override opening-prompt summaries and follow renames without modifying metadata', async t => {
+  const home = await fixture(t);
+  await catalog(home, 2);
+  const path = join(home, 'session-state', uuid(1), 'workspace.yaml');
+  const source = new SessionSource(home);
+  await writeFile(path, 'name: "Critter Call: improve cards"\nuser_named: true\n');
+  let snapshot = await source.snapshot();
+  assert.equal(snapshot.sessions.find(row => row.id === uuid(1)).title, 'Critter Call: improve cards');
+  assert.equal(snapshot.sessions.find(row => row.id === uuid(2)).title, 'Task 2', 'missing workspace metadata keeps the catalog fallback');
+  const renamed = "name: 'Team''s dashboard'\n";
+  await writeFile(path, renamed);
+  snapshot = await source.snapshot();
+  assert.equal(snapshot.sessions.find(row => row.id === uuid(1)).title, "Team's dashboard");
+  assert.equal(await readFile(path, 'utf8'), renamed);
+  await writeFile(path, 'name: >-\n  Session name\n  across lines\n');
+  assert.equal((await source.snapshot()).sessions.find(row => row.id === uuid(1)).title, 'Session name across lines');
+  await writeFile(path, 'name: ""\n');
+  assert.equal((await source.snapshot()).sessions.find(row => row.id === uuid(1)).title, 'Task 1');
+});
+
+test('invalid workspace names warn explicitly while retaining the catalog title', async t => {
+  const home = await fixture(t);
+  await catalog(home, 1);
+  const path = join(home, 'session-state', uuid(1), 'workspace.yaml');
+  for (const yaml of ['name: [unterminated', 'name: 42\n', 'name: good\nname: duplicate\n']) {
+    await writeFile(path, yaml);
+    const snapshot = await new SessionSource(home).snapshot();
+    assert.equal(snapshot.sessions[0].title, 'Task 1');
+    assert.ok(snapshot.warnings.some(warning => warning.includes('cannot read workspace name')));
+  }
 });
 
 test('incremental event tail handles partial writes, UTF-8 boundaries, large model events, and truncation', async t => {

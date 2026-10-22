@@ -1,5 +1,6 @@
 import { CritterVoice } from './audio.mjs';
 import { characterFromText } from './characters.mjs';
+import { Playground } from './playground.mjs';
 
 const $ = id => document.getElementById(id);
 const demo = new URLSearchParams(location.search).has('demo');
@@ -28,6 +29,23 @@ const openedCards = new Set();
 const characterAssets = new Map();
 const drafts = new Map();
 let seen = new Set();
+let controlKey = '';
+let createOperationId;
+let afterUnlockNew = false;
+const pendingSends = new Map();
+let showPlayground = false;
+try { showPlayground = localStorage.getItem('critter-show-playground') === 'true'; }
+catch { notify('Playground preferences will last only for this visit because browser storage is unavailable.'); }
+try {
+  controlKey = sessionStorage.getItem('critter-control-key') || '';
+} catch { notify('Control access will last only for this page visit because browser storage is unavailable.'); }
+const fragmentKey = new URLSearchParams(location.hash.slice(1)).get('control');
+if (fragmentKey) {
+  controlKey = fragmentKey;
+  history.replaceState(null, '', location.pathname + location.search);
+  try { sessionStorage.setItem('critter-control-key', controlKey); }
+  catch { notify('Controls will stay unlocked only for this page visit.'); }
+}
 try { seen = new Set(JSON.parse(localStorage.getItem('critter-call-seen') || '[]')); }
 catch { notify('Browser storage is unavailable; read markers will last only for this visit.'); }
 
@@ -39,6 +57,7 @@ const voice = new CritterVoice(value => {
   playbackProgress = progress;
   updatePlaybackHighlight();
 });
+const playground = new Playground($('playground'), { select: id => select(id), menu: openSessionMenu });
 
 function notify(message) {
   $('toast').textContent = message;
@@ -57,17 +76,28 @@ function remember(id) {
 function visibleSessions() { return snapshot.sessions.filter(row => (row.lifecycle || 'in-room') === view); }
 function current() { return visibleSessions().find(row => row.id === selectedId); }
 function bridgeRequests(id) { return snapshot.requests.filter(row => row.sessionId === id); }
-function pending(id) { return bridgeRequests(id).filter(row => row.status === 'pending'); }
-function unread(session) {
-  const latest = session.messages.filter(row => row.kind !== 'context').at(-1);
-  return session.messages.filter(row => row.kind === 'context' || (row === latest && !seen.has(row.id)));
+function pending(id) {
+  const agents = new Map();
+  for (const row of bridgeRequests(id)) {
+    if (row.status === 'pending' && !agents.has(row.agentName)) agents.set(row.agentName, row);
+  }
+  return [...agents.values()];
 }
-function hands(session) { return pending(session.id).length + unread(session).length; }
+function unread(session) {
+  const latest = session.messages.filter(row => !row.user && row.kind !== 'context').at(-1);
+  return session.messages.filter(row => !row.user && (row.kind === 'context' || (row === latest && !seen.has(row.id))));
+}
+function hands(session) {
+  const agents = new Set(pending(session.id).map(row => row.agentName));
+  if (unread(session).length) agents.add(null);
+  if (session.managed?.permissions.length) agents.add(null);
+  return agents.size;
+}
 function activeRequest() { return pending(selectedId).find(row => row.id === activeRequestId); }
 function draftKey() { return `${selectedId}:${activeRequestId || 'history'}`; }
 function saveDraft() { if (selectedId) drafts.set(draftKey(), $('reply').value); }
 function playbackMessage() {
-  return activeRequest() || [...(current()?.messages || [])].at(-1) || bridgeRequests(selectedId).at(-1);
+  return activeRequest() || (current()?.messages || []).filter(row => !row.user).at(-1) || bridgeRequests(selectedId).at(-1);
 }
 function playbackText() { return playbackMessage()?.message; }
 
@@ -90,9 +120,14 @@ function raisedHands() {
       key: `bridge:${request.id}`, sessionId: session.id, name: request.agentName || session.name,
       inRoom: (session.lifecycle || 'in-room') === 'in-room',
     });
-    for (const message of unread(session)) {
-      if (bridge.length && message.kind !== 'context') continue;
+    const messages = unread(session);
+    const message = messages.find(row => row.kind === 'context') || messages.at(-1);
+    if (message && !bridge.some(row => row.agentName === null)) {
       hands.push({ key: `history:${message.id}`, sessionId: session.id, name: session.name,
+        inRoom: (session.lifecycle || 'in-room') === 'in-room' });
+    }
+    if (session.managed?.permissions.length && !message && !bridge.some(row => row.agentName === null)) {
+      hands.push({ key: `permission:${session.managed.permissions[0].id}`, sessionId: session.id, name: session.name,
         inRoom: (session.lifecycle || 'in-room') === 'in-room' });
     }
   }
@@ -209,7 +244,7 @@ function renderTiles() {
   const tiles = visible.map(session => {
     const count = hands(session);
     const key = JSON.stringify([session.name, session.title, session.color, session.error, session.status,
-      session.lifecycle, count, pending(session.id).length, view]);
+      session.lifecycle, session.pinned, session.managed?.state, count, pending(session.id).length, view]);
     const previous = existing.get(session.id);
     if (previous?.dataset.renderKey === key) {
       previous.classList.toggle('selected', session.id === selectedId);
@@ -226,19 +261,26 @@ function renderTiles() {
     tile.classList.toggle('hand', count > 0);
     tile.setAttribute('aria-pressed', String(session.id === selectedId));
     tile.setAttribute('aria-haspopup', 'menu');
-    tile.setAttribute('aria-label', `${session.name}, ${session.title}${count ? `, ${count} raised hands` : ''}`);
+    tile.setAttribute('aria-label', `${session.title}, ${session.name}${session.pinned ? ', pinned' : ''}${count ? `, ${count} raised ${count === 1 ? 'hand' : 'hands'}` : ''}`);
+    tile.title = session.title;
     const top = el('span', 'tile-top');
-    top.append(el('span', 'tile-status', view === 'archived' ? 'Archived' : view === 'resolved' ? 'Out to play' : session.error ? 'Session error' : pending(session.id).length ? 'Has something to share'
+    top.append(el('span', 'tile-status', view === 'archived' ? 'Archived' : view === 'resolved' ? 'Out to play'
+      : session.managed && !session.managed.released ? `Managed \u00b7 ${session.managed.state}`
+        : session.error ? 'Session error' : pending(session.id).length ? 'Has something to share'
       : session.status === 'needs-context' ? 'Needs context in Copilot' : session.status === 'working' ? 'Working away' : 'Taking a breather'));
     if (count) top.append(el('span', 'hand-badge', `\u270B ${count > 1 ? count + ' hands' : 'Hand raised'}`));
     const scene = characterScene(session);
     const bottom = el('span', 'tile-bottom');
-    const name = el('span', 'tile-name', session.name);
+    const name = el('span', 'tile-name');
+    name.append(el('span', 'session-name', session.title));
     const wave = el('span', 'wave');
     wave.setAttribute('aria-hidden', 'true');
     for (let index = 0; index < 4; index++) wave.append(el('i'));
     name.append(wave);
-    bottom.append(name, el('span', 'tile-title', session.title));
+    const identity = el('span', 'tile-title');
+    identity.append(el('span', 'critter-badge', session.name));
+    if (session.pinned) identity.append(el('span', 'pin-badge', 'Pinned'));
+    bottom.append(name, identity);
     tile.append(scene, top, bottom);
     tile.addEventListener('click', () => select(session.id, true));
     tile.addEventListener('contextmenu', event => {
@@ -258,16 +300,23 @@ function renderTiles() {
     $('grid').replaceChildren(...tiles);
   }
   if (focused) [...$('grid').children].find(tile => tile.dataset.id === focused)?.focus({ preventScroll: true });
-  $('empty').hidden = visible.length > 0;
+  const playing = view === 'resolved' && showPlayground;
+  $('show-playground').hidden = view !== 'resolved';
+  $('show-playground').setAttribute('aria-pressed', String(showPlayground));
+  $('grid').hidden = playing;
+  $('playground').hidden = !playing;
+  playground.setActive(playing);
+  if (playing) playground.update(visible, characterAssets, selectedId);
+  $('empty').hidden = visible.length > 0 || playing;
   for (const [state, countId] of [['in-room', 'tile-count'], ['resolved', 'resolved-count'], ['archived', 'archived-count']]) {
     $(countId).textContent = snapshot.sessions.filter(session => (session.lifecycle || 'in-room') === state).length;
   }
   const roomCount = snapshot.sessions.filter(session => (session.lifecycle || 'in-room') === 'in-room').length;
-  $('session-count').textContent = `${roomCount} / 12 in the room`;
+  $('session-count').textContent = roomCount > 12 ? `${roomCount} in the room` : `${roomCount} / 12 in the room`;
   $('grid').setAttribute('aria-label', view === 'resolved' ? 'Resolved sessions out to play' : view === 'archived' ? 'Archived sessions' : 'Copilot sessions');
   $('empty-title').textContent = view === 'resolved' ? 'No one out to play yet.' : view === 'archived' ? 'Nothing archived yet.' : 'A little quiet in here.';
   $('empty-description').textContent = view === 'resolved' ? 'Right-click a call and choose Move to Resolved when it has all the context it needs.'
-    : view === 'archived' ? 'Archive finished calls from Out to play. You can always bring them back.'
+    : view === 'archived' ? 'Threads inactive for a week appear here. Right-click and Pin a call to bring it back.'
       : 'Open a Copilot session to bring a critter into the room, or explore the demo.';
   $('empty-demo').hidden = view !== 'in-room';
   for (const button of $('session-views').children) button.setAttribute('aria-pressed', String(button.dataset.view === view));
@@ -302,11 +351,14 @@ function renderConversation() {
   const request = activeRequest();
   $('reply').disabled = !session || sending;
   $('send').disabled = !session || sending || !$('reply').value.trim();
-  $('send').textContent = sending ? 'Sending...' : request ? 'Send reply \u2197' : 'Copy for Copilot \u2197';
+  const managed = session?.managed && !session.managed.released;
+  $('send').textContent = sending ? 'Sending...' : request ? 'Send reply \u2197'
+    : managed ? session.managed.state === 'idle' ? 'Send message \u2197' : 'Queue message \u2197' : 'Copy for Copilot \u2197';
   $('dismiss').disabled = !request || sending;
   $('dismiss').textContent = request?.kind === 'update' ? 'Acknowledge update' : 'Dismiss hand';
   $('replay').disabled = !playbackText();
   $('demo-hand').hidden = snapshot.mode !== 'demo';
+  renderManaged(session);
   if (!session) {
     $('selected-emoji').className = 'profile-emoji';
     $('selected-emoji').textContent = '\u{1F331}';
@@ -328,16 +380,17 @@ function renderConversation() {
     $('selected-emoji').dataset.sessionId = session.id;
     $('selected-emoji').replaceChildren(characterScene(session));
   }
-  $('conversation-title').textContent = session.name;
-  $('selected-title').textContent = session.title;
+  $('conversation-title').textContent = session.title;
+  $('selected-title').textContent = session.name;
   $('selected-title').title = `${session.title}\n${session.repository || ''}\n${session.id}`;
-  $('source-badge').textContent = request ? (snapshot.mode === 'demo' ? 'Demo bridge' : 'Reply bridge') : 'History only';
+  $('source-badge').textContent = request ? (snapshot.mode === 'demo' ? 'Demo bridge' : 'Reply bridge') : managed ? 'Managed call' : 'History only';
   $('reply-label').textContent = `To ${request?.agentName || session.name}`;
   $('reply-status').textContent = request
     ? snapshot.mode === 'demo' ? 'Demo reply only. No real agent receives this message.'
       : `Replies return through MCP to this hand${request.agentName ? ` (${request.agentName})` : ''}.`
-    : 'Observing local history. Copy your response into this session in Copilot, or connect the MCP bridge.';
-  $('composer-hint').textContent = request ? 'Only this hand receives your reply' : `Session ${session.id.slice(0, 8)}`;
+    : managed ? 'Messages go to this managed call. Busy or disconnected calls keep messages in their queue.'
+      : 'Observing local history. Copy your response into this session in Copilot, or connect the MCP bridge.';
+  $('composer-hint').textContent = request ? 'Only this hand receives your reply' : managed ? 'One active turn per call' : `Session ${session.id.slice(0, 8)}`;
   const waiting = pending(selectedId);
   $('request-picker').hidden = waiting.length < 2;
   const pickerFocus = document.activeElement?.dataset.request;
@@ -351,7 +404,8 @@ function renderConversation() {
   }));
   if (pickerFocus) [...$('request-picker').children].find(button => button.dataset.request === pickerFocus)?.focus({ preventScroll: true });
   const messages = [
-    ...session.messages.map(item => ({ ...item, speaker: session.name, source: 'copilot' })),
+    ...session.messages.map(item => ({ ...item, speaker: item.user ? 'You' : session.name,
+      source: session.managed && !session.managed.released ? 'managed' : 'copilot' })),
     ...bridgeRequests(selectedId).flatMap(item => [
       { ...item, speaker: item.agentName || session.name, source: 'bridge' },
       ...(item.reply ? [{ id: `${item.id}-reply`, message: item.reply, createdAt: item.repliedAt, speaker: 'You', user: true }] : []),
@@ -362,18 +416,22 @@ function renderConversation() {
     transcriptKey = key;
     if (!messages.length) {
       const empty = el('div', 'transcript-empty');
-      empty.append(el('span', '', '\u2727'), el('div', '', 'Nothing to share just yet.\nGood work sometimes sounds like quiet.'));
+      empty.append(el('span', '', '\u2727'), el('div', '', session.lifecycle === 'archived'
+        ? 'Right-click this call and choose Pin to load its history and bring it into the room.'
+        : 'Nothing to share just yet.\nGood work sometimes sounds like quiet.'));
       $('transcript').replaceChildren(empty);
     } else {
       $('transcript').replaceChildren(...messages.map(message => {
         const bubble = el('article', `message${message.user ? ' user' : ''}${message.id === activeRequestId ? ' active' : ''}`);
         const label = el('div', 'message-label');
-        label.append(el('span', '', message.speaker), el('span', '', message.user ? 'reply' : message.kind));
+        if (message.delivery) bubble.dataset.delivery = message.delivery;
+        label.append(el('span', '', message.speaker), el('span', '', message.delivery || (message.user ? 'reply' : message.kind)));
         const paragraph = el('p', 'message-text', message.message);
         paragraph.dataset.messageId = message.id;
         bubble.append(label, paragraph);
         if (!message.user) bubble.append(el('div', 'message-note',
-          message.source === 'copilot' ? 'From Copilot history \u00b7 read-only'
+          message.source === 'managed' ? 'From managed Copilot session'
+            : message.source === 'copilot' ? 'From Copilot history \u00b7 read-only'
             : message.status === 'pending' ? 'Hand raised \u00b7 waiting for you'
               : message.status === 'answered' ? 'Reply delivered to the bridge' : 'Dismissed by you'));
         return bubble;
@@ -393,7 +451,13 @@ function render() {
 
 async function refresh() {
   try {
-    const response = await fetch(`/api/snapshot${demo ? '?room=demo' : ''}`);
+    let response = await fetch(`/api/snapshot${demo ? '?room=demo' : ''}`, { headers: controlKey ? { Authorization: `Bearer ${controlKey}` } : {} });
+    if (response.status === 401 && controlKey) {
+      controlKey = '';
+      try { sessionStorage.removeItem('critter-control-key'); } catch { /* In-memory access is already cleared. */ }
+      notify('Local controls are locked. Use the current control key after a server restart.');
+      response = await fetch(`/api/snapshot${demo ? '?room=demo' : ''}`);
+    }
     if (!response.ok) throw new Error(`Local session feed returned ${response.status}.`);
     const next = await response.json();
     await Promise.all(next.sessions.map(async session => {
@@ -406,6 +470,9 @@ async function refresh() {
     const sessionIds = new Set(next.sessions.map(session => session.id));
     for (const id of characterAssets.keys()) if (!sessionIds.has(id)) characterAssets.delete(id);
     snapshot = next;
+    $('unlock-controls').hidden = demo || next.controls;
+    $('new-call').hidden = demo;
+    $('control-key-path').textContent = next.controlKeyFile || '';
     // An agent can complete a different turn while the human drafts a reply.
     if (selectedId && !current()) {
       saveDraft();
@@ -455,7 +522,8 @@ async function refresh() {
 
 async function post(path, body) {
   const response = await fetch(path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Call-Token': snapshot.token },
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Call-Token': snapshot.token,
+      ...(controlKey ? { Authorization: `Bearer ${controlKey}` } : {}) },
     body: JSON.stringify({ ...body, room: snapshot.mode }),
   });
   const value = await response.json();
@@ -467,14 +535,17 @@ function closeSessionMenu(restoreFocus = false) {
   const id = menuSessionId;
   menuSessionId = undefined;
   $('session-menu').hidden = true;
-  if (restoreFocus) [...$('grid').children].find(tile => tile.dataset.id === id)?.focus();
+  if (restoreFocus) {
+    const container = view === 'resolved' && showPlayground ? $('playground').querySelector('.playground-sprites') : $('grid');
+    [...container.children].find(tile => tile.dataset.id === id)?.focus();
+  }
 }
 
 function openSessionMenu(session, x, y) {
   if (sending) return;
   menuSessionId = session.id;
   const menu = $('session-menu');
-  $('menu-title').textContent = session.name;
+  $('menu-title').textContent = session.title;
   for (const button of menu.querySelectorAll('button')) {
     button.hidden = button.dataset.state === (session.lifecycle || 'in-room')
       || (button.dataset.state === 'archived' && (session.lifecycle || 'in-room') === 'in-room');
@@ -504,6 +575,13 @@ function switchView(state) {
 }
 
 for (const button of $('session-views').children) button.addEventListener('click', () => switchView(button.dataset.view));
+$('show-playground').addEventListener('click', () => {
+  closeSessionMenu();
+  showPlayground = !showPlayground;
+  try { localStorage.setItem('critter-show-playground', String(showPlayground)); }
+  catch { notify('Could not save the playground preference; it will last only for this visit.'); }
+  render();
+});
 for (const button of $('session-menu').querySelectorAll('button')) {
   button.addEventListener('click', async () => {
     const id = menuSessionId;
@@ -517,7 +595,7 @@ for (const button of $('session-menu').querySelectorAll('button')) {
       await refresh();
       notify(button.dataset.state === 'resolved' ? 'Moved to Resolved \u00b7 find this critter in Out to play.'
         : button.dataset.state === 'archived' ? 'Call archived. You can bring it back from Archived.'
-          : 'This critter is back in the room.');
+          : 'Pinned \u00b7 this critter stays in the room until you resolve or archive it.');
     } catch (error) { notify(error.message); }
     finally { sending = false; render(); }
   });
@@ -550,6 +628,25 @@ $('reply-form').addEventListener('submit', async event => {
   const message = $('reply').value;
   const request = activeRequest();
   const key = draftKey();
+  if (!request && current().managed && !current().managed.released) {
+    const sessionId = selectedId;
+    let operation = pendingSends.get(key);
+    if (!operation || operation.message !== message) {
+      operation = { messageId: crypto.randomUUID(), message };
+      pendingSends.set(key, operation);
+    }
+    sending = true;
+    render();
+    try {
+      await post('/api/calls/message', { sessionId, ...operation });
+      pendingSends.delete(key);
+      drafts.delete(key);
+      $('reply').value = '';
+      await refresh();
+    } catch (error) { notify(error.message); }
+    finally { sending = false; render(); }
+    return;
+  }
   if (!request) {
     try { await navigator.clipboard.writeText(message); notify('Copied. Paste into the selected session in Copilot; nothing was sent automatically.'); }
     catch (error) { notify(`Clipboard unavailable. Select and copy your text manually. ${error.message}`); }
@@ -616,6 +713,129 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) voice.stop();
   else void drainNotifications();
 });
-window.addEventListener('pagehide', () => voice.stop());
+window.addEventListener('pagehide', () => { voice.stop(); playground.setActive(false); });
+window.addEventListener('pageshow', () => { if (snapshot.sessions.length) render(); });
 async function poll() { await refresh(); setTimeout(poll, 2000); }
 void poll();
+
+async function managedAction(path, body) {
+  if (sending) return;
+  sending = true;
+  render();
+  try { await post(path, body); await refresh(); }
+  catch (error) { notify(error.message); }
+  finally { sending = false; render(); }
+}
+
+function renderManaged(session) {
+  const panel = $('managed-panel');
+  const focused = document.activeElement?.dataset.control;
+  panel.replaceChildren();
+  const managed = session?.managed;
+  panel.hidden = !managed;
+  if (!managed) return;
+  const action = (parent, label, path, body, key) => {
+    const button = el('button', 'button secondary', label);
+    button.type = 'button';
+    button.disabled = sending;
+    button.dataset.control = key;
+    button.addEventListener('click', () => void managedAction(path, { sessionId: session.id, ...body }));
+    parent.append(button);
+  };
+  panel.append(el('p', '', managed.released ? `Released to Copilot. Reopen session ${session.id} there.`
+    : `Managed call: ${managed.state}. ${managed.queue.length} queued message(s).`));
+  if (managed.error) panel.append(el('p', 'form-error', managed.error));
+  if (managed.uncertain) panel.append(el('p', 'form-error', 'Delivery is uncertain. No message will be automatically replayed. Cancel queued messages, release the call, and review its history in Copilot.'));
+  for (const permission of managed.permissions) {
+    const box = el('section', 'permission');
+    box.append(el('strong', '', 'Copilot requests permission for this operation'));
+    box.append(el('pre', '', JSON.stringify(permission.toolCall, null, 2)));
+    for (const option of permission.options) {
+      action(box, option.name, '/api/calls/permission',
+        { permissionId: permission.id, optionId: option.optionId }, `${permission.id}:${option.optionId}`);
+    }
+    action(box, 'Cancel operation', '/api/calls/permission', { permissionId: permission.id, optionId: null }, permission.id);
+    panel.append(box);
+  }
+  for (const message of managed.queue) {
+    const row = el('div', 'queued-message');
+    row.append(el('p', '', message.message.slice(0, 200)));
+    action(row, 'Cancel queued message', '/api/calls/cancel-message', { messageId: message.id }, message.id);
+    panel.append(row);
+  }
+  if (!managed.released && !managed.connected && !managed.uncertain) {
+    const reconnect = el('button', 'button secondary', 'Reconnect');
+    reconnect.disabled = sending;
+    reconnect.addEventListener('click', () => {
+      if (confirm('Reconnect only if this session is not open or running in Copilot elsewhere. Continue?')) {
+        void managedAction('/api/calls/reconnect', { sessionId: session.id });
+      }
+    });
+    panel.append(reconnect);
+  }
+  if (!managed.released && !['working', 'awaiting-permission', 'starting'].includes(managed.state) && !managed.queue.length) {
+    const release = el('button', 'button secondary', 'Release to Copilot');
+    release.disabled = sending;
+    release.addEventListener('click', () => {
+      if (confirm('Close Critter Call’s connection and make this call history-only? You can then reopen it in Copilot.')) {
+        void managedAction('/api/calls/release', { sessionId: session.id });
+      }
+    });
+    panel.append(release);
+  }
+  if (focused) [...panel.querySelectorAll('button')].find(button => button.dataset.control === focused)?.focus({ preventScroll: true });
+}
+
+function showNewCall() {
+  if (!snapshot.controls) {
+    afterUnlockNew = true;
+    $('unlock-dialog').showModal();
+    return;
+  }
+  createOperationId = crypto.randomUUID();
+  $('new-call-error').hidden = true;
+  $('new-call-dialog').showModal();
+}
+$('new-call').addEventListener('click', showNewCall);
+$('unlock-controls').addEventListener('click', () => { afterUnlockNew = false; $('unlock-dialog').showModal(); });
+$('cancel-unlock').addEventListener('click', () => { $('unlock-dialog').close(); $('control-key').value = ''; });
+$('unlock-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  controlKey = $('control-key').value.trim();
+  $('control-key').value = '';
+  const success = await refresh();
+  if (success && snapshot.controls) {
+    try { sessionStorage.setItem('critter-control-key', controlKey); } catch { notify('Controls unlocked for this page visit only.'); }
+    $('unlock-dialog').close();
+    if (afterUnlockNew) showNewCall();
+  } else {
+    $('unlock-error').textContent = 'Unlock failed. Use the current local control key.';
+    $('unlock-error').hidden = false;
+  }
+});
+$('cancel-new-call').addEventListener('click', () => $('new-call-dialog').close());
+$('new-call-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (sending) return;
+  sending = true;
+  $('create-call').disabled = true;
+  $('cancel-new-call').disabled = true;
+  try {
+    const created = await post('/api/calls/new', { operationId: createOperationId,
+      cwd: $('call-folder').value, title: $('call-label').value, model: $('call-model').value, message: $('call-message').value });
+    $('new-call-dialog').close();
+    $('new-call-form').reset();
+    await refresh();
+    sending = false;
+    switchView('in-room');
+    select(created.sessionId);
+  } catch (error) {
+    $('new-call-error').textContent = `${error.message} If creation may have reached Copilot, check history before creating another call.`;
+    $('new-call-error').hidden = false;
+  } finally {
+    sending = false;
+    $('create-call').disabled = false;
+    $('cancel-new-call').disabled = false;
+    render();
+  }
+});

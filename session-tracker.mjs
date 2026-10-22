@@ -23,7 +23,8 @@ export class SessionTracker {
     if (value?.version !== 1 || !value.sessions || typeof value.sessions !== 'object' || Array.isArray(value.sessions)
       || Object.entries(value.sessions).some(([id, entry]) => !sessionIdPattern.test(id)
         || !entry || !sessionStates.includes(entry.state) || !Number.isFinite(Date.parse(entry.updatedAt))
-        || typeof entry.title !== 'string' || typeof entry.repository !== 'string')) {
+        || typeof entry.title !== 'string' || typeof entry.repository !== 'string'
+        || (entry.lastActivityAt !== undefined && !Number.isFinite(Date.parse(entry.lastActivityAt))))) {
       throw new Error('session-status.json has an unsupported or invalid format. Restore the file before changing session states.');
     }
     return value;
@@ -38,6 +39,7 @@ export class SessionTracker {
       data.sessions[session.id] = {
         state, updatedAt: new Date().toISOString(),
         title: session.title || 'Untitled session', repository: session.repository || '',
+        ...(Number.isFinite(Date.parse(session.updatedAt)) ? { lastActivityAt: session.updatedAt } : {}),
       };
       if (this.path === null) this.memory = data;
       else {

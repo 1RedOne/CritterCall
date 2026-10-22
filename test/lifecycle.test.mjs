@@ -59,7 +59,7 @@ test('resolved history survives beyond latest 200; room gets 12 other sessions a
     for (let index = 1; index <= 220; index++) {
       const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
       db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)').run(id, `Task ${index}`, 'local/workshop', '',
-        new Date(Date.UTC(2026, 9, 1, 12, index)).toISOString());
+        new Date(Date.now() - (221 - index) * 60000).toISOString());
     }
     db.close();
     const tracked = { [rows[0].id]: { state: 'resolved', title: 'Old title', repository: '',
@@ -76,6 +76,116 @@ test('resolved history survives beyond latest 200; room gets 12 other sessions a
     assert.equal(restored.sessions.length, 12);
     assert.equal(restored.sessions[0].id, rows[0].id);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('one-week import cutoff archives old threads regardless of tab refresh, without reading archived logs', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'critter-age-test-'));
+  const now = Date.parse('2026-10-21T16:00:00Z');
+  const week = 7 * 24 * 60 * 60 * 1000;
+  try {
+    const db = new DatabaseSync(join(home, 'session-store.db'));
+    db.exec('CREATE TABLE sessions (id TEXT, summary TEXT, repository TEXT, cwd TEXT, updated_at TEXT)');
+    const dates = [now - week + 1, now - week, now - week - 1, now, now - week * 2];
+    dates.forEach((date, index) => db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)')
+      .run(rows[index].id, `Task ${index}`, '', '', new Date(date).toISOString()));
+    db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)').run(rows[5].id, 'Unknown age', '', '', 'invalid');
+    db.close();
+    await writeFile(join(home, 'open-sessions-state.json'), JSON.stringify({
+      [rows[2].id]: { refreshedAt: new Date(now).toISOString(), working: true },
+    }));
+    const source = new SessionSource(home);
+    const readLogs = [];
+    source.events = async id => {
+      readLogs.push(id);
+      return { messages: [], pendingTools: {}, working: false };
+    };
+    const tracked = {
+      [rows[3].id]: { state: 'resolved', updatedAt: new Date(now).toISOString() },
+      [rows[4].id]: { state: 'resolved', updatedAt: new Date(now).toISOString() },
+    };
+    const snapshot = await source.snapshot(tracked, now);
+    const states = new Map(snapshot.sessions.map(row => [row.id, row.lifecycle]));
+    assert.equal(states.get(rows[0].id), 'in-room', 'one millisecond younger than a week stays in the room');
+    for (const index of [1, 2, 4, 5]) assert.equal(states.get(rows[index].id), 'archived');
+    assert.equal(states.get(rows[3].id), 'resolved');
+    assert.deepEqual(new Set(readLogs), new Set([rows[0].id, rows[3].id]));
+    assert.ok(snapshot.warnings.some(message => message.includes('activity time is unavailable')));
+    tracked[rows[2].id] = { state: 'in-room', updatedAt: new Date(now).toISOString() };
+    const pinned = (await source.snapshot(tracked, now + week)).sessions.find(row => row.id === rows[2].id);
+    assert.equal(pinned.lifecycle, 'in-room');
+    assert.equal(pinned.pinned, true);
+    const missingId = '00000000-0000-4000-8000-000000000099';
+    const missing = await source.snapshot({ [missingId]: {
+      state: 'resolved', title: 'Missing catalog', repository: '', updatedAt: new Date(now).toISOString(),
+    } }, now);
+    assert.equal(missing.sessions.find(row => row.id === missingId).lifecycle, 'archived',
+      'a recent organizational-state change is not evidence of recent thread activity');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('all older catalog entries reach Archive and every explicit pin remains visible above the twelve-seat default', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'critter-many-imports-test-'));
+  const now = Date.parse('2026-10-21T16:00:00Z');
+  try {
+    const db = new DatabaseSync(join(home, 'session-store.db'));
+    db.exec('CREATE TABLE sessions (id TEXT, summary TEXT, repository TEXT, cwd TEXT, updated_at TEXT)');
+    const tracked = {};
+    for (let index = 1; index <= 225; index++) {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+      db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)')
+        .run(id, `Task ${index}`, '', '', '2026-10-01T12:00:00Z');
+      if (index <= 15) tracked[id] = { state: 'in-room', updatedAt: new Date(now).toISOString() };
+    }
+    db.close();
+    const source = new SessionSource(home);
+    source.events = async () => ({ messages: [], pendingTools: {}, working: false });
+    const snapshot = await source.snapshot(tracked, now);
+    assert.equal(snapshot.sessions.length, 225);
+    assert.equal(snapshot.sessions.filter(row => row.lifecycle === 'archived').length, 210);
+    assert.equal(snapshot.sessions.filter(row => row.lifecycle === 'in-room' && row.pinned).length, 15);
+    assert.equal(snapshot.sessions[0].pinned, true);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('pinning an old imported thread persists across restart and retains its activity timestamp without a catalog', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'critter-pin-http-test-'));
+  const options = { home, storePath: join(home, 'bridge.db') };
+  let app;
+  try {
+    const db = new DatabaseSync(join(home, 'session-store.db'));
+    db.exec('CREATE TABLE sessions (id TEXT, summary TEXT, repository TEXT, cwd TEXT, updated_at TEXT)');
+    const activity = '2026-01-01T00:00:00Z';
+    db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)').run(rows[0].id, 'Old call', '', '', activity);
+    db.close();
+    app = createCallServer(options);
+    let origin = await app.listen(0);
+    let snapshot = await (await fetch(`${origin}/api/snapshot`)).json();
+    assert.equal(snapshot.sessions[0].lifecycle, 'archived');
+    const response = await fetch(`${origin}/api/session-state`, {
+      method: 'POST', headers: { Origin: origin, 'X-Call-Token': snapshot.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: rows[0].id, state: 'in-room' }),
+    });
+    assert.equal(response.status, 200);
+    await app.close();
+    app = createCallServer(options);
+    origin = await app.listen(0);
+    snapshot = await (await fetch(`${origin}/api/snapshot`)).json();
+    assert.equal(snapshot.sessions[0].lifecycle, 'in-room');
+    assert.equal(snapshot.sessions[0].pinned, true);
+    const tracker = new SessionTracker(join(home, 'critter-call', 'session-status.json'));
+    const saved = await tracker.read();
+    assert.equal(saved.sessions[rows[0].id].lastActivityAt, activity);
+    const edit = new DatabaseSync(join(home, 'session-store.db'));
+    edit.exec('DELETE FROM sessions');
+    edit.close();
+    const source = new SessionSource(home);
+    assert.equal((await source.snapshot(saved.sessions)).sessions[0].updatedAt, activity);
+    await tracker.set(snapshot.sessions[0], 'resolved');
+    assert.equal((await source.snapshot((await tracker.read()).sessions)).sessions[0].lifecycle, 'archived');
+  } finally {
+    await app?.close();
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('HTTP lifecycle changes persist across restart, are protected, and leave MCP hands intact', async () => {

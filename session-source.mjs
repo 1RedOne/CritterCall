@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { open, stat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { load, CORE_SCHEMA } from './vendor/js-yaml.mjs';
 import { copilotHome, sessionIdPattern } from './bridge-store.mjs';
 
 const animals = [
@@ -69,6 +70,20 @@ export class SessionSource {
     this.cache = new Map();
   }
 
+  async sessionName(id) {
+    let source;
+    try { source = await readFile(join(this.home, 'session-state', id, 'workspace.yaml'), 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    const document = load(source, { schema: CORE_SCHEMA, onWarning(error) { throw error; } });
+    if (!document || typeof document !== 'object' || Array.isArray(document)) {
+      throw new Error('Workspace metadata must be a mapping.');
+    }
+    const name = document.name;
+    if (name === undefined || name === null || name === '') return;
+    if (typeof name !== 'string') throw new Error('Session name must be text.');
+    return name.trim() || undefined;
+  }
+
   async events(id) {
     const path = join(this.home, 'session-state', id, 'events.jsonl');
     const info = await stat(path);
@@ -116,12 +131,10 @@ export class SessionSource {
     } finally { await handle.close(); }
   }
 
-  async snapshot(tracked = {}) {
+  async snapshot(tracked = {}, now = Date.now()) {
     const warnings = [];
     const sessions = new Map();
     const archived = new Set();
-    const trackedIds = Object.keys(tracked);
-    const includeTracked = trackedIds.length ? ` OR id IN (${trackedIds.map(() => '?').join(',')})` : '';
     const readCatalog = async (filename, query, merge) => {
       const path = join(this.home, filename);
       try { await stat(path); }
@@ -133,18 +146,16 @@ export class SessionSource {
       try {
         db = new DatabaseSync(path, { readOnly: true });
         db.exec('PRAGMA busy_timeout = 1000');
-        for (const row of db.prepare(query).all(...trackedIds)) merge(row);
+        for (const row of db.prepare(query).all()) merge(row);
       } catch (error) { warnings.push(`Cannot read ${filename}: ${error.message}`); }
       finally { db?.close(); }
     };
     await readCatalog('session-store.db',
-      `SELECT id, summary, repository, cwd, updated_at FROM sessions
-        WHERE id IN (SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 200)${includeTracked}`,
+      'SELECT id, summary, repository, cwd, updated_at FROM sessions',
       row => sessions.set(row.id, { id: row.id, title: row.summary || 'Untitled session',
         repository: row.repository || '', cwd: row.cwd || '', updatedAt: row.updated_at }));
     await readCatalog('data.db',
-      `SELECT id, title, updated_at, archived_at FROM sessions
-        WHERE id IN (SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 200)${includeTracked}`,
+      'SELECT id, title, updated_at, archived_at FROM sessions',
       row => {
         if (row.archived_at) { archived.add(row.id); sessions.delete(row.id); return; }
         const old = sessions.get(row.id) || {};
@@ -153,7 +164,8 @@ export class SessionSource {
       });
     for (const [id, entry] of Object.entries(tracked)) {
       if (!sessions.has(id) && !archived.has(id)) {
-        sessions.set(id, { id, title: entry.title, repository: entry.repository, updatedAt: entry.updatedAt });
+        sessions.set(id, { id, title: entry.title, repository: entry.repository,
+          updatedAt: entry.lastActivityAt });
       }
     }
     let tabs = {};
@@ -164,21 +176,37 @@ export class SessionSource {
     catch (error) { warnings.push(`Cannot read session exclusions: ${error.message}`); }
     const candidates = [...sessions.values()].filter(row => sessionIdPattern.test(row.id)
       && !meta[row.id]?.deleted && !meta[row.id]?.archived);
+    const cutoff = now - 7 * 24 * 60 * 60 * 1000;
+    for (const row of candidates) {
+      row.pinned = tracked[row.id]?.state === 'in-room';
+      const activity = Date.parse(row.updatedAt);
+      row.lifecycle = row.pinned ? 'in-room'
+        : !Number.isFinite(activity) || activity <= cutoff ? 'archived' : tracked[row.id]?.state || 'in-room';
+      if (!Number.isFinite(activity) && !row.pinned) {
+        warnings.push(`Session ${row.id.slice(0, 8)}: activity time is unavailable; kept in Archive until pinned.`);
+      }
+    }
     // Open-tab history wins over general history, but is not evidence that a process is still alive.
     const recentlyUsed = row => Math.max(Date.parse(tabs[row.id]?.refreshedAt || row.updatedAt) || 0,
       Date.parse(tracked[row.id]?.updatedAt) || 0);
-    candidates.sort((a, b) => Number(Boolean(tabs[b.id] || tracked[b.id]?.state === 'in-room'))
-      - Number(Boolean(tabs[a.id] || tracked[a.id]?.state === 'in-room')) || recentlyUsed(b) - recentlyUsed(a));
-    const inRoom = row => !tracked[row.id] || tracked[row.id].state === 'in-room';
-    const selected = [...candidates.filter(inRoom).slice(0, 12), ...candidates.filter(row => !inRoom(row))];
+    candidates.sort((a, b) => Number(b.pinned) - Number(a.pinned)
+      || Number(Boolean(tabs[b.id])) - Number(Boolean(tabs[a.id])) || recentlyUsed(b) - recentlyUsed(a));
+    const pinned = candidates.filter(row => row.pinned);
+    const selected = [...pinned,
+      ...candidates.filter(row => row.lifecycle === 'in-room' && !row.pinned).slice(0, Math.max(0, 12 - pinned.length)),
+      ...candidates.filter(row => row.lifecycle !== 'in-room')];
     const output = await Promise.all(selected.map(async row => {
+      try { row.title = await this.sessionName(row.id) || row.title; }
+      catch (error) { warnings.push(`Session ${row.id.slice(0, 8)}: cannot read workspace name: ${error.message}`); }
       let state = { messages: [], pendingTools: {}, working: false };
-      try { state = await this.events(row.id); }
-      catch (error) {
-        warnings.push(`Session ${row.id.slice(0, 8)}: ${error.code === 'ENOENT' ? 'local event history is unavailable' : error.message}`);
+      if (row.lifecycle !== 'archived') {
+        try { state = await this.events(row.id); }
+        catch (error) {
+          warnings.push(`Session ${row.id.slice(0, 8)}: ${error.code === 'ENOENT' ? 'local event history is unavailable' : error.message}`);
+        }
       }
       const tab = tabs[row.id];
-      const fresh = tab && Date.now() - Date.parse(tab.refreshedAt) < 120000;
+      const fresh = tab && now - Date.parse(tab.refreshedAt) < 120000;
       const pending = Object.values(state.pendingTools);
       return { ...row, ...character(row.id), messages: [...state.messages, ...pending],
         status: pending.length ? 'needs-context' : fresh && tab.working ? 'working' : 'quiet',

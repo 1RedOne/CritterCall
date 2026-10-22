@@ -5,7 +5,7 @@ const store = new BridgeStore();
 const tools = [
   {
     name: 'raise_hand',
-    description: 'Raise a hand in the local Critter Call page. Use your current Copilot session UUID (from session context/workspace.yaml). agentName identifies a subagent if applicable. This does not replace permission approvals. Call get_reply with the returned requestId to receive the human response.',
+    description: 'Raise a hand in the local Critter Call page. Use your current Copilot session UUID (from session context/workspace.yaml). Use a stable agentName for a subagent. Each agent has one pending hand: repeated calls update its message/kind and return the same request ID until answered or dismissed. This does not replace permission approvals. Call get_reply with the returned request ID to receive the human response.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'message'],
       properties: { sessionId: { type: 'string' }, message: { type: 'string', maxLength: 12000 },
         kind: { type: 'string', enum: ['question', 'context', 'update'], default: 'question' },

@@ -44,10 +44,33 @@ export class BridgeStore {
     const kind = input.kind ?? 'question';
     if (!['question', 'context', 'update'].includes(kind)) throw new InputError('Unknown hand kind.');
     const agentName = input.agentName === undefined ? null : text(input.agentName, 'Agent name', 80);
-    const id = randomUUID();
-    this.db.prepare(`INSERT INTO requests (id, session_id, agent_name, kind, message, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run(id, input.sessionId, agentName, kind, message, new Date().toISOString());
-    return this.get(id);
+    const sessionId = input.sessionId.toLowerCase();
+    return this.transaction(() => {
+      const existing = this.db.prepare(`SELECT id FROM requests
+        WHERE lower(session_id) = ? AND agent_name IS ?
+        AND replied_at IS NULL AND dismissed_at IS NULL
+        ORDER BY created_at, rowid LIMIT 1`).get(sessionId, agentName);
+      const id = existing?.id || randomUUID();
+      if (existing) {
+        this.db.prepare('UPDATE requests SET kind = ?, message = ? WHERE id = ?').run(kind, message, id);
+      } else {
+        this.db.prepare(`INSERT INTO requests (id, session_id, agent_name, kind, message, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(id, sessionId, agentName, kind, message, new Date().toISOString());
+      }
+      return this.get(id);
+    });
+  }
+
+  transaction(action) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = action();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   get(id) {
@@ -59,7 +82,7 @@ export class BridgeStore {
 
   project(row) {
     return {
-      id: row.id, sessionId: row.session_id, agentName: row.agent_name,
+      id: row.id, sessionId: row.session_id.toLowerCase(), agentName: row.agent_name,
       kind: row.kind, message: row.message, createdAt: row.created_at,
       reply: row.reply, repliedAt: row.replied_at, dismissedAt: row.dismissed_at,
       status: row.replied_at ? 'answered' : row.dismissed_at ? 'dismissed' : 'pending',
@@ -75,28 +98,29 @@ export class BridgeStore {
   }
 
   reply(id, message) {
-    this.get(id);
     const reply = text(message, 'Reply');
-    const result = this.db.prepare(`UPDATE requests SET reply = ?, replied_at = ?
-      WHERE id = ? AND replied_at IS NULL AND dismissed_at IS NULL`)
-      .run(reply, new Date().toISOString(), id);
-    if (!result.changes) {
-      this.get(id);
-      throw new InputError('This hand was already answered or dismissed. Refresh before replying.', 409);
-    }
-    return this.get(id);
+    return this.transaction(() => {
+      const hand = this.get(id);
+      if (hand.status !== 'pending') {
+        throw new InputError('This hand was already answered or dismissed. Refresh before replying.', 409);
+      }
+      // Older versions could create several requests for one hand; settle every waiting ID.
+      this.db.prepare(`UPDATE requests SET reply = ?, replied_at = ?
+        WHERE lower(session_id) = ? AND agent_name IS ? AND replied_at IS NULL AND dismissed_at IS NULL`)
+        .run(reply, new Date().toISOString(), hand.sessionId, hand.agentName);
+      return this.get(id);
+    });
   }
 
   dismiss(id) {
-    this.get(id);
-    const result = this.db.prepare(`UPDATE requests SET dismissed_at = ?
-      WHERE id = ? AND replied_at IS NULL AND dismissed_at IS NULL`)
-      .run(new Date().toISOString(), id);
-    if (!result.changes) {
-      this.get(id);
-      throw new InputError('This hand was already answered or dismissed.', 409);
-    }
-    return this.get(id);
+    return this.transaction(() => {
+      const hand = this.get(id);
+      if (hand.status !== 'pending') throw new InputError('This hand was already answered or dismissed.', 409);
+      this.db.prepare(`UPDATE requests SET dismissed_at = ?
+        WHERE lower(session_id) = ? AND agent_name IS ? AND replied_at IS NULL AND dismissed_at IS NULL`)
+        .run(new Date().toISOString(), hand.sessionId, hand.agentName);
+      return this.get(id);
+    });
   }
 
   close() { this.db.close(); }

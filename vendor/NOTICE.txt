@@ -1,0 +1,10 @@
+JS-YAML 4.1.1
+Source: https://github.com/nodeca/js-yaml
+Pinned commit: cc482e775913e6625137572a3712d2826170e53a
+Upstream file: dist/js-yaml.mjs
+License: MIT; see js-yaml.LICENSE.
+The distribution and license are unmodified.
+SHA-256 (js-yaml.mjs): efbc45850bf15f0c8ee3434983f512be656002d7507dc292c7ade4449b5d57fa
+
+This server-side parser reads local Copilot workspace metadata.
+It is not exposed as an HTTP asset and performs no network requests.

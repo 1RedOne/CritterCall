@@ -20,21 +20,20 @@
       <a href="/" id="live-room">My sessions</a>
       <a href="/?demo=1" id="demo-room">Demo room</a>
     </nav>
-    <button id="connect" class="button secondary"><span aria-hidden="true">&#8644;</span> Connect agents</button>
+    <div class="topbar-actions">
+      <button id="new-call" class="button primary"><span aria-hidden="true">+</span> New call</button>
+      <button id="connect" class="button secondary"><span aria-hidden="true">&#8644;</span> Connect agents</button>
+    </div>
   </header>
 
   <main>
-    <section class="meeting" aria-labelledby="room-title">
+    <section class="meeting" aria-label="Copilot calls">
       <div class="room-heading">
-        <div>
-          <div class="eyebrow"><span class="status-dot"></span> YOUR LITTLE CO-WORKING SPACE</div>
-          <h1 id="room-title">The workshop<span class="heading-dot">.</span></h1>
-          <p class="room-subtitle">Big ideas. Tiny faces. Everyone gets a turn.</p>
-        </div>
         <div class="room-meta">
           <span id="session-count" class="pill">Connecting...</span>
           <span id="connection" class="sync">Reading local sessions</span>
           <a href="/character-lab" class="lab-link">Character lab <span aria-hidden="true">&#8599;</span></a>
+          <button id="unlock-controls" class="text-button">Unlock controls</button>
         </div>
       </div>
 
@@ -45,9 +44,18 @@
           <button type="button" data-view="resolved" aria-pressed="false">Out to play <span id="resolved-count" class="count">0</span></button>
           <button type="button" data-view="archived" aria-pressed="false">Archived <span id="archived-count" class="count">0</span></button>
         </div>
+        <button id="show-playground" type="button" class="pill playground-toggle" aria-pressed="false" aria-controls="playground" hidden>Show Playground</button>
         <button id="next-hand" class="hand-queue" disabled><span aria-hidden="true">&#9995;</span> <span id="hand-count">No hands raised</span></button>
       </div>
       <div id="grid" class="agent-grid" aria-label="Copilot sessions"></div>
+      <section id="playground" class="playground" aria-label="Critter playground" hidden>
+        <div class="playground-stage">
+          <canvas width="480" height="300" aria-hidden="true"></canvas>
+          <div class="playground-sprites" role="group" aria-label="Critters out to play"></div>
+          <div id="playground-card" class="playground-card" role="tooltip" hidden></div>
+        </div>
+        <p class="playground-caption"></p>
+      </section>
       <div id="empty" class="empty" hidden>
         <span aria-hidden="true">&#127793;</span>
         <h2 id="empty-title">A little quiet in here.</h2>
@@ -82,6 +90,7 @@
       <div class="transcript-heading"><span>Conversation</span><button id="replay" class="text-button" disabled>Play again <span aria-hidden="true">&#9655;</span></button></div>
       <div id="transcript" class="transcript" role="log" aria-label="Selected agent conversation"></div>
       <div id="reply-status" class="reply-status" role="status">Select a character to get started.</div>
+      <div id="managed-panel" class="managed-panel" hidden></div>
       <form id="reply-form" class="composer">
         <label for="reply" id="reply-label">A little direction goes a long way.</label>
         <textarea id="reply" rows="3" maxlength="12000" placeholder="Your thoughts, extra context, or a tiny pep talk..." disabled></textarea>
@@ -98,11 +107,45 @@
   </main>
 
   <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="unlock-dialog">
+    <h2>Unlock local agent controls</h2>
+    <p>Open the local <code>open-controls.html</code> file, or paste the key from
+      <code id="control-key-path"></code>. This key is never available through the web API.
+      Do not share it with agents or put it in a conversation.</p>
+    <form id="unlock-form">
+      <label for="control-key">Local control key</label>
+      <input id="control-key" type="password" autocomplete="off" required>
+      <p id="unlock-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="cancel-unlock" type="button" class="button secondary">Cancel</button>
+        <button type="submit" class="button primary">Unlock</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="new-call-dialog">
+    <h2>New Copilot call</h2>
+    <p>Creates a real Copilot session. Its history can be reopened in Copilot after releasing the call here.</p>
+    <form id="new-call-form">
+      <label for="call-folder">Project folder (absolute path)</label>
+      <input id="call-folder" required placeholder="C:\git\my-project" maxlength="4096">
+      <label for="call-label">Call label (optional, shown in Critter Call)</label>
+      <input id="call-label" maxlength="200">
+      <label for="call-model">Model (optional; blank uses Copilot's default)</label>
+      <input id="call-model" maxlength="120">
+      <label for="call-message">Initial message</label>
+      <textarea id="call-message" required maxlength="12000" rows="4"></textarea>
+      <p id="new-call-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="cancel-new-call" type="button" class="button secondary">Cancel</button>
+        <button id="create-call" type="submit" class="button primary">Create call</button>
+      </div>
+    </form>
+  </dialog>
   <div id="session-menu" class="session-menu" role="menu" aria-label="Move call" hidden>
     <div id="menu-title" class="menu-title"></div>
     <button type="button" role="menuitem" data-state="resolved">Move to Resolved</button>
     <button type="button" role="menuitem" data-state="archived">Move to Archived</button>
-    <button type="button" role="menuitem" data-state="in-room">Move back to room</button>
+    <button type="button" role="menuitem" data-state="in-room">Pin</button>
     <p>This only organizes your call.</p>
   </div>
   <dialog id="setup">
