@@ -423,7 +423,7 @@ function node(tag, className, text) {
 }
 
 export class Playground {
-  constructor(root, { select, menu }) {
+  constructor(root, { select, expand = select, menu }) {
     this.root = root;
     this.stage = root.querySelector('.playground-stage');
     this.sprites = root.querySelector('.playground-sprites');
@@ -433,6 +433,7 @@ export class Playground {
     this.effects = new Map();
     this.sessions = new Map();
     this.select = select;
+    this.expand = expand;
     this.menu = menu;
     this.motion = matchMedia('(prefers-reduced-motion: reduce)');
     this.reschedule = () => this.schedule();
@@ -520,6 +521,7 @@ export class Playground {
         button.addEventListener('focus', () => this.showCard(session.id));
         button.addEventListener('blur', () => this.hideCard());
         button.addEventListener('click', () => this.select(session.id));
+        button.addEventListener('dblclick', () => this.expand(session.id));
         button.addEventListener('contextmenu', event => {
           event.preventDefault();
           this.menu(this.sessions.get(session.id), event.clientX, event.clientY);

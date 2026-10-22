@@ -23,6 +23,20 @@ Open **http://127.0.0.1:47821**. Use **Demo room** to try twelve fictional
 characters, questions, and replies without contacting real agents. `npm run demo`
 starts a demo-only server. Set `$env:PORT` to use a different port.
 
+## Chat layout
+
+Drag the divider beside the conversation pane to resize it on desktop.
+Keyboard users can focus the divider and use Left/Right to grow/shrink chat,
+or Home/End for its minimum/maximum width. Double-click the divider to reset
+the width. Custom widths are saved in browser local storage and constrained to
+the current window size.
+
+Double-click an agent card or playground critter to open a larger chat view,
+or choose **Expand chat** in the conversation header. **Back to room** or Escape
+restores the room without losing the selected thread or unsent reply. The same
+expanded view is available on mobile; the drag divider is desktop-only.
+Playground activities pause while the room is hidden behind expanded chat.
+
 ## New calls and direct messages
 
 **New call** creates a real session using the installed, signed-in Copilot CLI's
@@ -32,6 +46,13 @@ reopen in a fresh process. ACP is a preview interface; an incompatible or missin
 runtime produces an error rather than falling back to editing Copilot databases.
 Set `CRITTER_COPILOT` to the absolute path of a Copilot executable if it is not on
 `PATH`. Calls use your Copilot account and can incur normal model usage.
+
+The New Call and unlock dialogs can be dismissed with their close button,
+Cancel, Escape, or a click outside the dialog. Once **Create call** has been
+submitted, closing its dialog does not cancel the runtime request: creation
+continues in the background and the resulting call is pinned in the room.
+Reopening the dialog while creation is pending shows its progress without
+submitting another request.
 
 Agent execution requires a **local control key**, separate from the public
 page's browser write token. After starting the server, open:

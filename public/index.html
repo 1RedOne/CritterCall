@@ -26,7 +26,7 @@
     </div>
   </header>
 
-  <main>
+  <main id="workspace">
     <section class="meeting" aria-label="Copilot calls">
       <div class="room-heading">
         <div class="room-meta">
@@ -76,10 +76,14 @@
       </footer>
     </section>
 
-    <aside class="conversation" aria-labelledby="conversation-title">
+    <div id="chat-resizer" class="chat-resizer" role="separator" tabindex="0" aria-label="Resize chat" aria-orientation="vertical" aria-controls="conversation" title="Drag to resize chat. Arrow keys resize; double-click resets."></div>
+    <aside id="conversation" class="conversation" aria-labelledby="conversation-title">
       <div class="conversation-top">
         <span class="eyebrow">THE FLOOR IS YOURS</span>
-        <span id="source-badge" class="source-badge">Choose a critter</span>
+        <div class="chat-controls">
+          <span id="source-badge" class="source-badge">Choose a critter</span>
+          <button id="expand-chat" type="button" class="text-button" aria-expanded="false" aria-controls="conversation" disabled>Expand chat</button>
+        </div>
       </div>
       <div id="selected-profile" class="selected-profile">
         <div id="selected-emoji" class="profile-emoji" aria-hidden="true">&#127793;</div>
@@ -107,8 +111,11 @@
   </main>
 
   <div id="toast" class="toast" role="status" hidden></div>
-  <dialog id="unlock-dialog">
-    <h2>Unlock local agent controls</h2>
+  <dialog id="unlock-dialog" aria-labelledby="unlock-title">
+    <div class="dialog-heading">
+      <h2 id="unlock-title">Unlock local agent controls</h2>
+      <button id="close-unlock" type="button" class="button icon-button" aria-label="Close unlock controls">&#10005;</button>
+    </div>
     <p>Open the local <code>open-controls.html</code> file, or paste the key from
       <code id="control-key-path"></code>. This key is never available through the web API.
       Do not share it with agents or put it in a conversation.</p>
@@ -122,9 +129,13 @@
       </div>
     </form>
   </dialog>
-  <dialog id="new-call-dialog">
-    <h2>New Copilot call</h2>
+  <dialog id="new-call-dialog" aria-labelledby="new-call-title">
+    <div class="dialog-heading">
+      <h2 id="new-call-title">New Copilot call</h2>
+      <button id="close-new-call" type="button" class="button icon-button" aria-label="Close New Call">&#10005;</button>
+    </div>
     <p>Creates a real Copilot session. Its history can be reopened in Copilot after releasing the call here.</p>
+    <p id="new-call-progress" role="status" hidden>Creating the call. You may close this window; creation will continue in the background.</p>
     <form id="new-call-form">
       <label for="call-folder">Project folder (absolute path)</label>
       <input id="call-folder" required placeholder="C:\git\my-project" maxlength="4096">

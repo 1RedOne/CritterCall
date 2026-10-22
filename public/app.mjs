@@ -31,9 +31,21 @@ const drafts = new Map();
 let seen = new Set();
 let controlKey = '';
 let createOperationId;
+let createPayloadKey;
+let creatingCall = false;
 let afterUnlockNew = false;
 const pendingSends = new Map();
 let showPlayground = false;
+let chatExpanded = false;
+let chatWidth;
+let chatDrag;
+try {
+  const storedWidth = localStorage.getItem('critter-chat-width');
+  if (storedWidth !== null) {
+    chatWidth = Number(storedWidth);
+    if (!Number.isFinite(chatWidth) || chatWidth <= 0) throw new Error('Invalid saved chat width.');
+  }
+} catch { chatWidth = undefined; notify('Chat width could not be restored; using the default layout.'); }
 try { showPlayground = localStorage.getItem('critter-show-playground') === 'true'; }
 catch { notify('Playground preferences will last only for this visit because browser storage is unavailable.'); }
 try {
@@ -57,7 +69,101 @@ const voice = new CritterVoice(value => {
   playbackProgress = progress;
   updatePlaybackHighlight();
 });
-const playground = new Playground($('playground'), { select: id => select(id), menu: openSessionMenu });
+const playground = new Playground($('playground'), { select: id => select(id), expand: openAgentChat, menu: openSessionMenu });
+const desktopChat = matchMedia('(min-width: 621px)');
+
+function chatBounds() {
+  return { min: 295, max: Math.max(295, Math.min(900, $('workspace').clientWidth - 310)) };
+}
+
+function applyChatWidth() {
+  const { min, max } = chatBounds();
+  const defaultWidth = Number.parseFloat(getComputedStyle($('workspace')).getPropertyValue('--chat-default'));
+  const width = Math.round(Math.max(min, Math.min(max, chatWidth ?? defaultWidth)));
+  $('workspace').style.setProperty('--chat-width', `${width}px`);
+  $('chat-resizer').setAttribute('aria-valuemin', min);
+  $('chat-resizer').setAttribute('aria-valuemax', max);
+  $('chat-resizer').setAttribute('aria-valuenow', width);
+  $('chat-resizer').setAttribute('aria-valuetext', `Chat width ${width} pixels`);
+}
+
+function saveChatWidth() {
+  try {
+    if (chatWidth === undefined) localStorage.removeItem('critter-chat-width');
+    else localStorage.setItem('critter-chat-width', String(chatWidth));
+  } catch { notify('Could not save chat width; it will last only for this visit.'); }
+}
+
+function finishChatResize(save = true) {
+  if (!chatDrag) return;
+  const drag = chatDrag;
+  chatDrag = undefined;
+  if (!save) chatWidth = drag.preferred;
+  document.body.classList.remove('resizing-chat');
+  if ($('chat-resizer').hasPointerCapture(drag.pointerId)) $('chat-resizer').releasePointerCapture(drag.pointerId);
+  applyChatWidth();
+  if (save) saveChatWidth();
+}
+
+$('chat-resizer').addEventListener('pointerdown', event => {
+  if (event.button !== 0 || !desktopChat.matches || chatExpanded) return;
+  event.preventDefault();
+  chatDrag = { pointerId: event.pointerId, x: event.clientX,
+    width: $('conversation').getBoundingClientRect().width, preferred: chatWidth };
+  $('chat-resizer').setPointerCapture(event.pointerId);
+  document.body.classList.add('resizing-chat');
+});
+$('chat-resizer').addEventListener('pointermove', event => {
+  if (!chatDrag || event.pointerId !== chatDrag.pointerId) return;
+  const { min, max } = chatBounds();
+  chatWidth = Math.max(min, Math.min(max, chatDrag.width + chatDrag.x - event.clientX));
+  applyChatWidth();
+});
+$('chat-resizer').addEventListener('pointerup', () => finishChatResize());
+$('chat-resizer').addEventListener('pointercancel', () => finishChatResize(false));
+$('chat-resizer').addEventListener('lostpointercapture', () => finishChatResize());
+$('chat-resizer').addEventListener('dblclick', () => { chatWidth = undefined; applyChatWidth(); saveChatWidth(); });
+$('chat-resizer').addEventListener('keydown', event => {
+  if (!desktopChat.matches || chatExpanded || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const { min, max } = chatBounds();
+  const width = Number($('chat-resizer').getAttribute('aria-valuenow'));
+  chatWidth = event.key === 'Home' ? min : event.key === 'End' ? max
+    : Math.max(min, Math.min(max, width + (event.key === 'ArrowLeft' ? 20 : -20)));
+  applyChatWidth();
+  saveChatWidth();
+});
+window.addEventListener('resize', () => { finishChatResize(); applyChatWidth(); });
+applyChatWidth();
+
+function setChatExpanded(expanded) {
+  finishChatResize();
+  chatExpanded = expanded;
+  $('workspace').classList.toggle('chat-expanded', expanded);
+  $('expand-chat').textContent = expanded ? 'Back to room' : 'Expand chat';
+  $('expand-chat').setAttribute('aria-expanded', String(expanded));
+  render();
+  if (expanded) $('reply').focus({ preventScroll: true });
+  else {
+    const container = view === 'resolved' && showPlayground ? $('playground').querySelector('.playground-sprites') : $('grid');
+    [...container.children].find(tile => tile.dataset.id === selectedId)?.focus({ preventScroll: true });
+  }
+}
+
+function openAgentChat(id) {
+  if (sending) return;
+  select(id);
+  if (current()) setChatExpanded(true);
+}
+
+$('expand-chat').addEventListener('click', () => setChatExpanded(!chatExpanded));
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !event.defaultPrevented && chatExpanded
+    && !document.querySelector('dialog[open]') && $('session-menu').hidden) {
+    event.preventDefault();
+    setChatExpanded(false);
+  }
+});
 
 function notify(message) {
   $('toast').textContent = message;
@@ -252,7 +358,8 @@ function renderTiles() {
       previous.setAttribute('aria-pressed', String(session.id === selectedId));
       return previous;
     }
-    const tile = el('button', `tile color-${session.color}`);
+    const tile = previous || el('button');
+    tile.className = `tile color-${session.color}`;
     tile.type = 'button';
     tile.dataset.id = session.id;
     tile.dataset.renderKey = key;
@@ -281,19 +388,24 @@ function renderTiles() {
     identity.append(el('span', 'critter-badge', session.name));
     if (session.pinned) identity.append(el('span', 'pin-badge', 'Pinned'));
     bottom.append(name, identity);
-    tile.append(scene, top, bottom);
-    tile.addEventListener('click', () => select(session.id, true));
-    tile.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      openSessionMenu(session, event.clientX, event.clientY);
-    });
-    tile.addEventListener('keydown', event => {
-      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    tile.replaceChildren(scene, top, bottom);
+    if (!previous) {
+      tile.addEventListener('click', () => select(session.id, true));
+      tile.addEventListener('dblclick', () => openAgentChat(session.id));
+      tile.addEventListener('contextmenu', event => {
         event.preventDefault();
-        const bounds = tile.getBoundingClientRect();
-        openSessionMenu(session, bounds.left + 20, bounds.top + 30);
-      }
-    });
+        const latest = visibleSessions().find(row => row.id === session.id);
+        if (latest) openSessionMenu(latest, event.clientX, event.clientY);
+      });
+      tile.addEventListener('keydown', event => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+          event.preventDefault();
+          const latest = visibleSessions().find(row => row.id === session.id);
+          const bounds = tile.getBoundingClientRect();
+          if (latest) openSessionMenu(latest, bounds.left + 20, bounds.top + 30);
+        }
+      });
+    }
     return tile;
   });
   if (tiles.length !== $('grid').children.length || tiles.some((tile, index) => tile !== $('grid').children[index])) {
@@ -305,7 +417,7 @@ function renderTiles() {
   $('show-playground').setAttribute('aria-pressed', String(showPlayground));
   $('grid').hidden = playing;
   $('playground').hidden = !playing;
-  playground.setActive(playing);
+  playground.setActive(playing && !chatExpanded);
   if (playing) playground.update(visible, characterAssets, selectedId);
   $('empty').hidden = visible.length > 0 || playing;
   for (const [state, countId] of [['in-room', 'tile-count'], ['resolved', 'resolved-count'], ['archived', 'archived-count']]) {
@@ -349,6 +461,7 @@ function select(id, play = false, requestId) {
 function renderConversation() {
   const session = current();
   const request = activeRequest();
+  $('expand-chat').disabled = !session && !chatExpanded;
   $('reply').disabled = !session || sending;
   $('send').disabled = !session || sending || !$('reply').value.trim();
   const managed = session?.managed && !session.managed.released;
@@ -792,13 +905,33 @@ function showNewCall() {
     $('unlock-dialog').showModal();
     return;
   }
-  createOperationId = crypto.randomUUID();
-  $('new-call-error').hidden = true;
+  renderCreationState();
   $('new-call-dialog').showModal();
 }
 $('new-call').addEventListener('click', showNewCall);
 $('unlock-controls').addEventListener('click', () => { afterUnlockNew = false; $('unlock-dialog').showModal(); });
-$('cancel-unlock').addEventListener('click', () => { $('unlock-dialog').close(); $('control-key').value = ''; });
+for (const [dialogId, buttons] of [['new-call-dialog', ['cancel-new-call', 'close-new-call']],
+  ['unlock-dialog', ['cancel-unlock', 'close-unlock']]]) {
+  const dialog = $(dialogId);
+  const dismissDialog = () => {
+    if (dialogId === 'unlock-dialog') afterUnlockNew = false;
+    dialog.close();
+  };
+  for (const button of buttons) $(button).addEventListener('click', dismissDialog);
+  dialog.addEventListener('cancel', event => { event.preventDefault(); dismissDialog(); });
+  let outside = false;
+  const isOutside = event => {
+    const box = dialog.getBoundingClientRect();
+    return event.target === dialog && (event.clientX < box.left || event.clientX > box.right
+      || event.clientY < box.top || event.clientY > box.bottom);
+  };
+  dialog.addEventListener('pointerdown', event => { outside = isOutside(event); });
+  dialog.addEventListener('click', event => { if (outside && isOutside(event)) dismissDialog(); outside = false; });
+}
+$('unlock-dialog').addEventListener('close', () => { afterUnlockNew = false; $('control-key').value = ''; });
+$('new-call-dialog').addEventListener('close', () => {
+  if (creatingCall) notify('Call creation continues in the background. Closing this window does not cancel the request.');
+});
 $('unlock-form').addEventListener('submit', async event => {
   event.preventDefault();
   controlKey = $('control-key').value.trim();
@@ -806,36 +939,54 @@ $('unlock-form').addEventListener('submit', async event => {
   const success = await refresh();
   if (success && snapshot.controls) {
     try { sessionStorage.setItem('critter-control-key', controlKey); } catch { notify('Controls unlocked for this page visit only.'); }
+    const continueNewCall = afterUnlockNew;
     $('unlock-dialog').close();
-    if (afterUnlockNew) showNewCall();
+    if (continueNewCall) showNewCall();
   } else {
     $('unlock-error').textContent = 'Unlock failed. Use the current local control key.';
     $('unlock-error').hidden = false;
   }
 });
-$('cancel-new-call').addEventListener('click', () => $('new-call-dialog').close());
+function renderCreationState() {
+  $('create-call').disabled = creatingCall;
+  $('cancel-new-call').textContent = creatingCall ? 'Close' : 'Cancel';
+  $('new-call-progress').hidden = !creatingCall;
+  for (const field of $('new-call-form').querySelectorAll('input, textarea')) field.disabled = creatingCall;
+}
+
 $('new-call-form').addEventListener('submit', async event => {
   event.preventDefault();
-  if (sending) return;
-  sending = true;
-  $('create-call').disabled = true;
-  $('cancel-new-call').disabled = true;
+  if (sending || creatingCall) return;
+  const payload = { cwd: $('call-folder').value, title: $('call-label').value,
+    model: $('call-model').value, message: $('call-message').value };
+  const payloadKey = JSON.stringify(payload);
+  if (!createOperationId || createPayloadKey !== payloadKey) {
+    createOperationId = crypto.randomUUID();
+    createPayloadKey = payloadKey;
+  }
+  creatingCall = true;
+  $('new-call-error').hidden = true;
+  renderCreationState();
   try {
-    const created = await post('/api/calls/new', { operationId: createOperationId,
-      cwd: $('call-folder').value, title: $('call-label').value, model: $('call-model').value, message: $('call-message').value });
+    const created = await post('/api/calls/new', { operationId: createOperationId, ...payload });
+    const showCreated = $('new-call-dialog').open;
+    creatingCall = false;
     $('new-call-dialog').close();
     $('new-call-form').reset();
+    createOperationId = undefined;
+    createPayloadKey = undefined;
     await refresh();
-    sending = false;
-    switchView('in-room');
-    select(created.sessionId);
+    if (showCreated && !sending) {
+      switchView('in-room');
+      select(created.sessionId);
+    } else notify('Call created and pinned in the room. Its creation was not cancelled by closing the dialog.');
   } catch (error) {
     $('new-call-error').textContent = `${error.message} If creation may have reached Copilot, check history before creating another call.`;
     $('new-call-error').hidden = false;
+    if (!$('new-call-dialog').open) notify($('new-call-error').textContent);
   } finally {
-    sending = false;
-    $('create-call').disabled = false;
-    $('cancel-new-call').disabled = false;
+    creatingCall = false;
+    renderCreationState();
     render();
   }
 });

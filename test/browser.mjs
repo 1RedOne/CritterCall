@@ -67,6 +67,17 @@ async function waitFor(expression, description, milliseconds = 10000) {
   throw new Error(`Browser check timed out: ${description}`);
 }
 
+async function clickPoint(x, y, clickCount = 1) {
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount });
+}
+
+async function pressKey(key, windowsVirtualKeyCode) {
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode });
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode });
+}
+
 try {
   const executable = process.env.CRITTER_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   await access(executable);
@@ -85,7 +96,7 @@ try {
   let port;
   for (let index = 0; index < 100; index++) {
     try { port = Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); break; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    catch (error) { if (!['ENOENT', 'EBUSY'].includes(error.code)) throw error; }
     if (browserExited) throw new Error(`Browser exited early: ${stderr.join('').slice(-2000)}`);
     await delay(100);
   }
@@ -289,6 +300,84 @@ try {
   await cdp.evaluate("document.getElementById('dismiss').click()");
   await waitFor("document.getElementById('hand-count').textContent === 'No hands raised'", 'clearing the one parent hand removes its badge');
   assert.equal((await client.call('get_reply', { requestId: parent.id, waitSeconds: 0 })).status, 'dismissed');
+  await cdp.call('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await cdp.evaluate(`document.getElementById('reply').value = 'Keep this chat draft';
+    document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}));`);
+  const divider = await cdp.evaluate(`(() => {
+    const rect = document.getElementById('chat-resizer').getBoundingClientRect();
+    window.resizeEvents = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'lostpointercapture']) {
+      document.getElementById('chat-resizer').addEventListener(type, event => window.resizeEvents.push([type, event.clientX, event.button, event.buttons]));
+      document.addEventListener(type, event => window.resizeEvents.push(['document', type, event.target.id || event.target.className, event.clientX,
+        event.pointerId, document.getElementById('chat-resizer').hasPointerCapture(event.pointerId), document.body.className]));
+    }
+    window.addEventListener('resize', () => window.resizeEvents.push(['resize', innerWidth]));
+    return {x: rect.left + rect.width / 2, y: rect.top + 100, width: document.getElementById('conversation').getBoundingClientRect().width};
+  })()`);
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: divider.x, y: divider.y, buttons: 0 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: divider.x, y: divider.y, button: 'left', buttons: 1, clickCount: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: divider.x - 180, y: divider.y, button: 'left', buttons: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: divider.x - 180, y: divider.y, button: 'left', buttons: 0, clickCount: 1 });
+  const resizedWidth = await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width");
+  assert.ok(Math.abs(resizedWidth - divider.width - 180) <= 1, 'dragging divider gives the chat the requested extra width: ' +
+    JSON.stringify({ divider, resizedWidth, events: await cdp.evaluate('window.resizeEvents'), errors }));
+  await cdp.evaluate("document.getElementById('chat-resizer').focus()");
+  await pressKey('ArrowLeft', 37);
+  assert.ok(Math.abs(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width") - resizedWidth - 20) <= 1);
+  await pressKey('Home', 36);
+  assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 295);
+  await pressKey('End', 35);
+  assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 900);
+  await cdp.evaluate("document.getElementById('chat-resizer').dispatchEvent(new MouseEvent('dblclick', {bubbles:true}))");
+  assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 340);
+  await cdp.evaluate("document.getElementById('chat-resizer').focus()");
+  await pressKey('ArrowLeft', 37);
+  const savedChatWidth = await cdp.evaluate("localStorage.getItem('critter-chat-width')");
+  assert.equal(savedChatWidth, '360');
+  const chatTarget = await cdp.evaluate(`(() => {
+    const tile = document.querySelector('.tile.selected');
+    const rect = tile.getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  })()`);
+  await clickPoint(chatTarget.x, chatTarget.y, 1);
+  await clickPoint(chatTarget.x, chatTarget.y, 2);
+  assert.equal(await cdp.evaluate("document.getElementById('workspace').classList.contains('chat-expanded')"), true, 'native agent double-click expands chat');
+  assert.ok(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width >= 1000"));
+  assert.equal(await cdp.evaluate("document.getElementById('reply').value"), 'Keep this chat draft');
+  assert.equal(await cdp.evaluate("getComputedStyle(document.querySelector('.meeting')).display"), 'none');
+  if (process.env.CRITTER_SCREENSHOT) {
+    const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+    await writeFile(process.env.CRITTER_SCREENSHOT.replace(/\.png$/i, '-expanded-chat.png'), Buffer.from(screenshot.data, 'base64'));
+  }
+  await pressKey('Escape', 27);
+  assert.equal(await cdp.evaluate("document.getElementById('workspace').classList.contains('chat-expanded')"), false);
+  assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 360);
+  assert.equal(await cdp.evaluate("document.getElementById('reply').value"), 'Keep this chat draft');
+  fixtureState.sessions[1].messages = [{ id: 'double-click-unread', kind: 'update', message: 'Unread update for double-click regression.' }];
+  await waitFor(`document.querySelector('.tile[data-id="${fixtureState.sessions[1].id}"]').classList.contains('hand')`, 'unread agent is available for native double-click');
+  const unreadTarget = await cdp.evaluate(`(() => {
+    window.unreadChatTile = document.querySelector('.tile[data-id="${fixtureState.sessions[1].id}"]');
+    const rect = window.unreadChatTile.getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  })()`);
+  await clickPoint(unreadTarget.x, unreadTarget.y, 1);
+  assert.ok(await cdp.evaluate("document.querySelector('.tile.selected') === window.unreadChatTile"), 'acknowledging an unread update preserves the click target');
+  await clickPoint(unreadTarget.x, unreadTarget.y, 2);
+  assert.equal(await cdp.evaluate("document.getElementById('workspace').classList.contains('chat-expanded')"), true);
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await waitFor("document.getElementById('conversation').getBoundingClientRect().width <= innerWidth", 'expanded chat adapts to mobile');
+  assert.ok(await cdp.evaluate('document.documentElement.scrollWidth <= innerWidth'));
+  assert.equal(await cdp.evaluate("getComputedStyle(document.getElementById('chat-resizer')).display"), 'none');
+  await cdp.evaluate("document.getElementById('expand-chat').click()");
+  assert.equal(await cdp.evaluate("getComputedStyle(document.querySelector('.meeting')).display"), 'flex');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
+  await cdp.evaluate(`document.querySelector('.tile[data-id="${sessionId}"]').click()`);
+  assert.equal(await cdp.evaluate("document.getElementById('reply').value"), 'Keep this chat draft');
+  await cdp.evaluate("document.getElementById('reply').value = ''; document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}))");
+  fixtureState.sessions[1].messages = [];
+  await cdp.call('Page.reload');
+  await waitFor("document.querySelectorAll('.tile').length === 12 && document.getElementById('conversation').getBoundingClientRect().width === 360", 'custom chat width survives reload');
+  await cdp.evaluate("document.getElementById('sound').value = 'off'");
   await cdp.evaluate(`document.querySelector('.tile').dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true, button: 2, clientX: innerWidth - 5, clientY: innerHeight - 5
   }));`);
@@ -309,6 +398,10 @@ try {
   fixtureState.sessions[0].messages = [{ id: 'playground-recap', kind: 'update', message: 'Together we fixed the timer race and added regression coverage.' }];
   await cdp.evaluate("document.getElementById('show-playground').click()");
   await waitFor("!document.getElementById('playground').hidden && document.querySelectorAll('.playground-critter').length === 1", 'resolved critter enters the playground');
+  await cdp.evaluate("document.querySelector('.playground-critter').dispatchEvent(new MouseEvent('dblclick', {bubbles:true}))");
+  assert.equal(await cdp.evaluate("document.getElementById('workspace').classList.contains('chat-expanded')"), true, 'playground critter double-click also expands chat');
+  assert.equal(await cdp.evaluate("document.getElementById('playground').dataset.motion"), 'paused', 'hidden playground pauses in expanded chat');
+  await cdp.evaluate("document.getElementById('expand-chat').click(); document.querySelector('.playground-critter').blur()");
   assert.equal(await cdp.evaluate("document.getElementById('grid').hidden"), true);
   await waitFor("document.querySelector('.playground-body').complete && document.querySelector('.playground-body').naturalWidth > 0", 'playground uses the existing character artwork');
   assert.equal(await cdp.evaluate("document.querySelector('.playground-critter').dataset.hash"),
@@ -549,13 +642,63 @@ try {
   assert.equal(await cdp.evaluate("document.getElementById('reply').disabled"), true);
   await cdp.evaluate("document.getElementById('new-call').click()");
   assert.equal(await cdp.evaluate("document.getElementById('unlock-dialog').open"), true, 'New call requires local control access');
+  for (const dismissal of ['close-unlock', 'cancel-unlock', 'escape', 'backdrop']) {
+    if (dismissal === 'escape') await pressKey('Escape', 27);
+    else if (dismissal === 'backdrop') await clickPoint(5, 5);
+    else await cdp.evaluate(`document.getElementById('${dismissal}').click()`);
+    await waitFor("!document.getElementById('unlock-dialog').open", 'unlock modal dismisses via ' + dismissal);
+    await cdp.evaluate("document.getElementById('new-call').click()");
+  }
   await cdp.evaluate(`document.getElementById('control-key').value = ${JSON.stringify(app.controlKey)};
     document.getElementById('unlock-form').requestSubmit();`);
   await waitFor("document.getElementById('new-call-dialog').open", 'control-key unlock continues to New call');
+  for (const dismissal of ['close-new-call', 'cancel-new-call', 'escape', 'backdrop']) {
+    if (dismissal === 'escape') await pressKey('Escape', 27);
+    else if (dismissal === 'backdrop') await clickPoint(5, 5);
+    else await cdp.evaluate(`document.getElementById('${dismissal}').click()`);
+    await waitFor("!document.getElementById('new-call-dialog').open", 'New Call modal dismisses via ' + dismissal);
+    await cdp.evaluate("document.getElementById('new-call').click()");
+  }
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 540, deviceScaleFactor: 1, mobile: true });
+  assert.ok(await cdp.evaluate(`(() => {
+    const box = document.getElementById('close-new-call').getBoundingClientRect();
+    const dialog = document.getElementById('new-call-dialog').getBoundingClientRect();
+    return box.top >= 0 && box.bottom <= innerHeight && dialog.height <= innerHeight - 32
+      && document.documentElement.scrollWidth <= innerWidth;
+  })()`), 'New Call close button remains reachable on a short mobile viewport');
+  await cdp.evaluate("document.getElementById('close-new-call').click()");
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
+  await cdp.evaluate(`document.getElementById('new-call').click();
+    window.createRequests = 0;
+    window.originalCreateFetch = window.fetch;
+    window.fetch = async (...args) => {
+      if (new URL(args[0], location.href).pathname === '/api/calls/new') {
+        window.createRequests++;
+        const response = await window.originalCreateFetch(...args);
+        await new Promise(resolve => { window.finishCreateResponse = resolve; });
+        return response;
+      }
+      return window.originalCreateFetch(...args);
+    };`);
   await cdp.evaluate(`document.getElementById('call-folder').value = ${JSON.stringify(home)};
     document.getElementById('call-label').value = 'Browser managed call';
     document.getElementById('call-message').value = 'Request permission';
     document.getElementById('new-call-form').requestSubmit();`);
+  await waitFor("!!window.finishCreateResponse && !document.getElementById('new-call-progress').hidden", 'creation is held in flight for dismissal regression');
+  assert.equal(await cdp.evaluate("document.getElementById('cancel-new-call').disabled"), false);
+  await cdp.evaluate("document.getElementById('cancel-new-call').click()");
+  assert.equal(await cdp.evaluate("document.getElementById('new-call-dialog').open"), false, 'pending creation can be dismissed');
+  await cdp.evaluate("document.querySelector('#session-views [data-view=\"archived\"]').click()");
+  assert.equal(await cdp.evaluate("document.querySelector('#session-views [data-view=\"archived\"]').getAttribute('aria-pressed')"), 'true', 'background creation does not lock the rest of the app');
+  await cdp.evaluate("document.getElementById('new-call').click()");
+  assert.equal(await cdp.evaluate("document.getElementById('create-call').disabled && !document.getElementById('new-call-progress').hidden"), true);
+  assert.equal(await cdp.evaluate('window.createRequests'), 1, 'reopening pending creation does not submit it again');
+  await pressKey('Escape', 27);
+  await cdp.evaluate('window.finishCreateResponse()');
+  await waitFor("!document.getElementById('create-call').disabled", 'background creation completes after modal dismissal');
+  assert.equal(await cdp.evaluate("document.querySelector('#session-views [data-view=\"archived\"]').getAttribute('aria-pressed')"), 'true', 'background completion does not steal the selected view');
+  assert.equal(await cdp.evaluate("document.getElementById('new-call-dialog').open"), false);
+  await cdp.evaluate("window.fetch = window.originalCreateFetch; document.querySelector('#session-views [data-view=\"in-room\"]').click()");
   await waitFor("document.getElementById('conversation-title').textContent === 'Browser managed call' && !!document.querySelector('.permission')", 'new real-protocol managed call shows its permission request');
   assert.equal(await cdp.evaluate("document.getElementById('source-badge').textContent"), 'Managed call');
   assert.ok(await cdp.evaluate("document.querySelector('.permission pre').textContent.includes('Write fixture.txt')"));
