@@ -130,6 +130,13 @@ Raised hands have a bright orange border, pulsing glow, waving badge, and a
 more energetic character bounce, including on the selected card. Reduced-motion
 settings disable these animations while keeping the prominent colors and badge.
 
+Right-click an agent card or playground critter for **Dismiss Hand**.
+Dismissal settles the targeted MCP hand without answering it; other agents'
+hands and your selected conversation stay unchanged. With multiple hands, the
+menu names the selected hand (or the first pending one on another card).
+History-only notifications are acknowledged in this browser, not answered in
+Copilot. This never approves or denies a runtime permission request.
+
 Chatter uses local copies of Acedio's `animalese.js`, its audio bank, and
 `riffwave.js`, pinned to revision `6f18a909df12cdddab59438640ac8019b78fac2f`.
 The engine is MIT licensed, the audio by **Josh Simmons** is **CC BY 4.0**,

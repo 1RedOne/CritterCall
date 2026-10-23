@@ -191,7 +191,7 @@ function pending(id) {
 }
 function unread(session) {
   const latest = session.messages.filter(row => !row.user && row.kind !== 'context').at(-1);
-  return session.messages.filter(row => !row.user && (row.kind === 'context' || (row === latest && !seen.has(row.id))));
+  return session.messages.filter(row => !row.user && !seen.has(row.id) && (row.kind === 'context' || row === latest));
 }
 function hands(session) {
   const agents = new Set(pending(session.id).map(row => row.agentName));
@@ -467,7 +467,7 @@ function renderConversation() {
   const managed = session?.managed && !session.managed.released;
   $('send').textContent = sending ? 'Sending...' : request ? 'Send reply \u2197'
     : managed ? session.managed.state === 'idle' ? 'Send message \u2197' : 'Queue message \u2197' : 'Copy for Copilot \u2197';
-  $('dismiss').disabled = !request || sending;
+  $('dismiss').disabled = sending || (!request && (!session || !unread(session).length));
   $('dismiss').textContent = request?.kind === 'update' ? 'Acknowledge update' : 'Dismiss hand';
   $('replay').disabled = !playbackText();
   $('demo-hand').hidden = snapshot.mode !== 'demo';
@@ -659,10 +659,16 @@ function openSessionMenu(session, x, y) {
   menuSessionId = session.id;
   const menu = $('session-menu');
   $('menu-title').textContent = session.title;
-  for (const button of menu.querySelectorAll('button')) {
+  for (const button of menu.querySelectorAll('button[data-state]')) {
     button.hidden = button.dataset.state === (session.lifecycle || 'in-room')
       || (button.dataset.state === 'archived' && (session.lifecycle || 'in-room') === 'in-room');
   }
+  const request = (session.id === selectedId ? activeRequest() : undefined) || pending(session.id)[0];
+  const dismiss = $('menu-dismiss-hand');
+  dismiss.hidden = !request && !unread(session).length;
+  dismiss.dataset.handId = request?.id || '';
+  dismiss.textContent = request && hands(session) > 1
+    ? `Dismiss Hand: ${request.agentName || session.name}` : 'Dismiss Hand';
   menu.hidden = false;
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8))}px`;
@@ -695,7 +701,7 @@ $('show-playground').addEventListener('click', () => {
   catch { notify('Could not save the playground preference; it will last only for this visit.'); }
   render();
 });
-for (const button of $('session-menu').querySelectorAll('button')) {
+for (const button of $('session-menu').querySelectorAll('button[data-state]')) {
   button.addEventListener('click', async () => {
     const id = menuSessionId;
     if (!id || sending) return;
@@ -713,6 +719,17 @@ for (const button of $('session-menu').querySelectorAll('button')) {
     finally { sending = false; render(); }
   });
 }
+$('menu-dismiss-hand').addEventListener('click', () => {
+  const session = snapshot.sessions.find(row => row.id === menuSessionId);
+  const requestId = $('menu-dismiss-hand').dataset.handId;
+  const request = pending(menuSessionId).find(row => row.id === requestId);
+  if (requestId && !request) {
+    closeSessionMenu(true);
+    notify('That hand is no longer pending.');
+    return;
+  }
+  void dismissHand(session, request);
+});
 document.addEventListener('pointerdown', event => {
   if (!$('session-menu').contains(event.target)) closeSessionMenu();
 });
@@ -777,18 +794,22 @@ $('reply-form').addEventListener('submit', async event => {
   } catch (error) { notify(error.message); }
   finally { sending = false; render(); }
 });
-$('dismiss').addEventListener('click', async () => {
-  const request = activeRequest();
-  if (!request || sending) return;
+async function dismissHand(session, request) {
+  if (!session || sending) return;
+  const messages = request?.agentName ? [] : unread(session);
+  if (!request && !messages.length) return;
+  closeSessionMenu(true);
+  voice.stop();
   sending = true;
   render();
   try {
-    await post('/api/dismiss', { requestId: request.id });
-    activeRequestId = undefined;
+    if (request) await post('/api/dismiss', { requestId: request.id });
+    for (const message of messages) remember(message.id);
     await refresh();
   } catch (error) { notify(error.message); }
   finally { sending = false; render(); }
-});
+}
+$('dismiss').addEventListener('click', () => void dismissHand(current(), activeRequest()));
 $('next-hand').addEventListener('click', () => {
   const waiting = visibleSessions().filter(session => hands(session));
   if (!waiting.length) return;
@@ -928,7 +949,9 @@ for (const [dialogId, buttons] of [['new-call-dialog', ['cancel-new-call', 'clos
   dialog.addEventListener('pointerdown', event => { outside = isOutside(event); });
   dialog.addEventListener('click', event => { if (outside && isOutside(event)) dismissDialog(); outside = false; });
 }
-$('unlock-dialog').addEventListener('close', () => { afterUnlockNew = false; $('control-key').value = ''; });
+$('unlock-dialog').addEventListener('close', () => {
+  if (!$('unlock-dialog').open) { afterUnlockNew = false; $('control-key').value = ''; }
+});
 $('new-call-dialog').addEventListener('close', () => {
   if (creatingCall) notify('Call creation continues in the background. Closing this window does not cancel the request.');
 });
@@ -939,7 +962,7 @@ $('unlock-form').addEventListener('submit', async event => {
   const success = await refresh();
   if (success && snapshot.controls) {
     try { sessionStorage.setItem('critter-control-key', controlKey); } catch { notify('Controls unlocked for this page visit only.'); }
-    const continueNewCall = afterUnlockNew;
+    const continueNewCall = afterUnlockNew && $('unlock-dialog').open;
     $('unlock-dialog').close();
     if (continueNewCall) showNewCall();
   } else {

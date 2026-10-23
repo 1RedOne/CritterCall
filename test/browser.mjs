@@ -78,6 +78,19 @@ async function pressKey(key, windowsVirtualKeyCode) {
   await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode });
 }
 
+async function openContextMenu(selector) {
+  const { x, y } = await cdp.evaluate(`(() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    target.scrollIntoView({block: 'center', inline: 'nearest'});
+    const rect = target.getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  })()`);
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', buttons: 2, clickCount: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', buttons: 0, clickCount: 1 });
+  await waitFor("!document.getElementById('session-menu').hidden", 'native right-click opens agent actions');
+}
+
 try {
   const executable = process.env.CRITTER_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   await access(executable);
@@ -272,6 +285,11 @@ try {
   const third = await client.call('raise_hand', { sessionId, message: 'Question three', agentName: 'Helper three' });
   await waitFor("document.querySelectorAll('#request-picker button').length === 2", 'multiple concurrent hands arrive');
   assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B 2 hands');
+  await openContextMenu('.tile.selected');
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').textContent"), 'Dismiss Hand: Helper two');
+  await delay(2200);
+  assert.equal(await cdp.evaluate("document.activeElement.id"), 'menu-dismiss-hand', 'polling keeps keyboard focus in the context menu rather than the request picker');
+  await cdp.evaluate("document.getElementById('session-menu').dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}))");
   await cdp.evaluate(`var reply = document.getElementById('reply'); reply.value = 'Draft for two'; reply.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelectorAll('#request-picker button')[1].click();`);
   assert.equal(await cdp.evaluate("document.getElementById('reply').value"), '');
@@ -282,6 +300,29 @@ try {
   assert.equal((await client.call('get_reply', { requestId: second.id, waitSeconds: 0 })).reply, 'Draft for two');
   assert.equal((await client.call('get_reply', { requestId: third.id, waitSeconds: 0 })).status, 'pending');
   await waitFor("document.querySelector('.message.active .message-text')?.textContent === 'Question three'", 'next pending hand becomes reply target');
+  const otherSessionId = fixtureState.sessions[1].id;
+  const otherHand = await client.call('raise_hand', { sessionId: otherSessionId, message: 'Dismiss me from another card', agentName: 'Other helper' });
+  const retainedHand = await client.call('raise_hand', { sessionId: otherSessionId, message: 'Keep this other hand pending', agentName: 'Retained helper' });
+  await waitFor(`document.querySelector('.tile[data-id="${otherSessionId}"] .hand-badge')?.textContent.includes('2 hands')`, 'other card has two independently dismissible hands');
+  await cdp.evaluate(`document.getElementById('reply').value = 'Keep question three draft';
+    document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}));`);
+  await openContextMenu(`.tile[data-id="${otherSessionId}"]`);
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').textContent"), 'Dismiss Hand: Other helper');
+  await cdp.evaluate("document.getElementById('menu-dismiss-hand').click()");
+  await waitFor(`document.querySelector('.tile[data-id="${otherSessionId}"] .hand-badge')?.textContent === '\u270B Hand raised'`, 'menu dismissal clears only its named target hand');
+  assert.equal((await client.call('get_reply', { requestId: otherHand.id, waitSeconds: 0 })).status, 'dismissed');
+  assert.equal((await client.call('get_reply', { requestId: retainedHand.id, waitSeconds: 0 })).status, 'pending');
+  assert.equal((await client.call('get_reply', { requestId: third.id, waitSeconds: 0 })).status, 'pending');
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected').dataset.id"), sessionId, 'dismissing another card does not change the selected conversation');
+  assert.equal(await cdp.evaluate("document.getElementById('reply').value"), 'Keep question three draft');
+  await openContextMenu(`.tile[data-id="${otherSessionId}"]`);
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').textContent"), 'Dismiss Hand');
+  await cdp.evaluate("document.getElementById('menu-dismiss-hand').click()");
+  await waitFor(`!document.querySelector('.tile[data-id="${otherSessionId}"]').classList.contains('hand')`, 'last bridge hand leaves no raised badge');
+  assert.equal((await client.call('get_reply', { requestId: retainedHand.id, waitSeconds: 0 })).status, 'dismissed');
+  await openContextMenu(`.tile[data-id="${otherSessionId}"]`);
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').hidden"), true, 'no dismissal option without a raised hand');
+  await cdp.evaluate("document.getElementById('session-menu').dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}))");
   await cdp.evaluate("document.getElementById('dismiss').click()");
   await waitFor("document.getElementById('send').textContent.includes('Copy for Copilot')", 'dismissed hand returns to observer mode');
   assert.equal((await client.call('get_reply', { requestId: third.id, waitSeconds: 0 })).status, 'dismissed');
@@ -296,22 +337,23 @@ try {
   await waitFor("document.querySelector('.message.active .message-text')?.textContent === 'Parent bridge question'", 'parent bridge hand arrives alongside native history');
   assert.equal(await cdp.evaluate("document.querySelector('.tile.selected .hand-badge').textContent"), '\u270B Hand raised');
   assert.equal(await cdp.evaluate("document.getElementById('hand-count').textContent"), '1 hand raised');
-  fixtureState.sessions[0].messages = [];
   await cdp.evaluate("document.getElementById('dismiss').click()");
   await waitFor("document.getElementById('hand-count').textContent === 'No hands raised'", 'clearing the one parent hand removes its badge');
   assert.equal((await client.call('get_reply', { requestId: parent.id, waitSeconds: 0 })).status, 'dismissed');
+  fixtureState.sessions[0].messages = [{ id: 'native-dismiss', kind: 'context', message: 'A history-only hand to acknowledge locally.' }];
+  await waitFor("document.querySelector('.tile.selected').classList.contains('hand')", 'history-only context raises a hand');
+  await openContextMenu('.tile.selected');
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').hidden"), false);
+  await cdp.evaluate("document.getElementById('menu-dismiss-hand').click()");
+  await waitFor("document.getElementById('hand-count').textContent === 'No hands raised'", 'history-only context can be acknowledged without pretending to answer in Copilot');
+  await delay(2200);
+  assert.equal(await cdp.evaluate("document.querySelector('.tile.selected').classList.contains('hand')"), false, 'local acknowledgement survives polling');
+  fixtureState.sessions[0].messages = [];
   await cdp.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await cdp.evaluate(`document.getElementById('reply').value = 'Keep this chat draft';
     document.getElementById('reply').dispatchEvent(new Event('input', {bubbles:true}));`);
   const divider = await cdp.evaluate(`(() => {
     const rect = document.getElementById('chat-resizer').getBoundingClientRect();
-    window.resizeEvents = [];
-    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'lostpointercapture']) {
-      document.getElementById('chat-resizer').addEventListener(type, event => window.resizeEvents.push([type, event.clientX, event.button, event.buttons]));
-      document.addEventListener(type, event => window.resizeEvents.push(['document', type, event.target.id || event.target.className, event.clientX,
-        event.pointerId, document.getElementById('chat-resizer').hasPointerCapture(event.pointerId), document.body.className]));
-    }
-    window.addEventListener('resize', () => window.resizeEvents.push(['resize', innerWidth]));
     return {x: rect.left + rect.width / 2, y: rect.top + 100, width: document.getElementById('conversation').getBoundingClientRect().width};
   })()`);
   await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: divider.x, y: divider.y, buttons: 0 });
@@ -319,8 +361,8 @@ try {
   await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: divider.x - 180, y: divider.y, button: 'left', buttons: 1 });
   await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: divider.x - 180, y: divider.y, button: 'left', buttons: 0, clickCount: 1 });
   const resizedWidth = await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width");
-  assert.ok(Math.abs(resizedWidth - divider.width - 180) <= 1, 'dragging divider gives the chat the requested extra width: ' +
-    JSON.stringify({ divider, resizedWidth, events: await cdp.evaluate('window.resizeEvents'), errors }));
+  assert.ok(Math.abs(resizedWidth - divider.width - 180) <= 1,
+    `dragging divider gives the chat the requested extra width: ${divider.width} -> ${resizedWidth}`);
   await cdp.evaluate("document.getElementById('chat-resizer').focus()");
   await pressKey('ArrowLeft', 37);
   assert.ok(Math.abs(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width") - resizedWidth - 20) <= 1);
@@ -328,6 +370,11 @@ try {
   assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 295);
   await pressKey('End', 35);
   assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 900);
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 982, deviceScaleFactor: 1, mobile: false });
+  await waitFor("document.getElementById('conversation').getBoundingClientRect().width <= 490", 'chat clamps to preserve room space in a narrower window');
+  assert.ok(await cdp.evaluate('document.documentElement.scrollWidth <= innerWidth'));
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1512, height: 982, deviceScaleFactor: 1, mobile: false });
+  await waitFor("document.getElementById('conversation').getBoundingClientRect().width === 900", 'preferred width returns when the window grows');
   await cdp.evaluate("document.getElementById('chat-resizer').dispatchEvent(new MouseEvent('dblclick', {bubbles:true}))");
   assert.equal(await cdp.evaluate("document.getElementById('conversation').getBoundingClientRect().width"), 340);
   await cdp.evaluate("document.getElementById('chat-resizer').focus()");
@@ -526,7 +573,8 @@ try {
   assert.equal(await cdp.evaluate("[...window.activityFixture.widget.world.agents.values()].some(agent => !!agent.activity)"), false);
   await cdp.evaluate('window.activityFixture.widget.setActive(true)');
   await waitFor("window.activityFixture.observation.using.size === 4 && window.activityFixture.observation.swing", 'all four equipment activities run in the real renderer');
-  assert.ok(await cdp.evaluate('window.activityFixture.observation.bubbles && window.activityFixture.observation.seated && window.activityFixture.observation.sliding'));
+  await waitFor('window.activityFixture.observation.bubbles && window.activityFixture.observation.seated && window.activityFixture.observation.sliding',
+    'bubble particles, seated boat passenger and slide pose render');
   assert.equal(await cdp.evaluate("window.activityFixture.widget.world.stations.get('boat').queue.length"), 1, 'second sailor waits in line');
   await waitFor("[...document.querySelectorAll('#activity-fixture .playground-boat, #activity-fixture .playground-swing')].every(image => image.complete && image.naturalWidth > 0)", 'original equipment artwork renders');
   if (process.env.CRITTER_SCREENSHOT) {
@@ -608,6 +656,14 @@ try {
   await waitFor("document.querySelector('#session-views [data-view=\"resolved\"]').getAttribute('aria-pressed') === 'true' && document.querySelectorAll('.tile').length === 1", 'Out to play and resolved state survive reload');
   await cdp.evaluate("document.getElementById('show-playground').click()");
   await waitFor("!document.getElementById('playground').hidden && document.querySelectorAll('.playground-critter').length === 1", 'restored critter can return to the playground');
+  const playgroundHand = await client.call('raise_hand', { sessionId, message: 'Dismiss this playground hand' });
+  await waitFor("document.getElementById('source-badge').textContent === 'Reply bridge'", 'playground session receives its hand');
+  await openContextMenu('.playground-critter');
+  assert.equal(await cdp.evaluate("document.getElementById('menu-dismiss-hand').hidden"), false, 'playground context menu also offers dismissal');
+  await cdp.evaluate("document.getElementById('menu-dismiss-hand').click()");
+  await waitFor("document.getElementById('source-badge').textContent === 'History only'", 'playground dismissal returns session to history-only');
+  assert.equal((await client.call('get_reply', { requestId: playgroundHand.id, waitSeconds: 0 })).status, 'dismissed');
+  assert.equal(await cdp.evaluate("document.getElementById('resolved-count').textContent"), '1', 'dismissal does not move a playground session');
   await cdp.evaluate(`document.querySelector('.playground-critter').dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 100
   })); document.querySelector('#session-menu [data-state="archived"]').click();`);
@@ -809,7 +865,7 @@ try {
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.ok(await cdp.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile lab does not overflow horizontally');
   assert.deepEqual(errors, [], 'No unhandled browser exceptions');
-  console.log('Browser checks passed: compact header, characters/audio, MCP replies, lifecycle/Pin, pixel playground, equipment queues/rides/bubbles and pause lifecycle, local control unlock, ACP New Call, permission denial, queued/direct messages, release, mobile layouts, and character lab.');
+  console.log('Browser checks passed: compact header, characters/audio, MCP replies, right-click bridge/history hand dismissal, lifecycle/Pin, chat resize/bounds/persistence and double-click expansion, pixel playground, equipment queues/rides/bubbles and pause lifecycle, dialog X/Cancel/Escape/backdrop dismissal, background New Call, local control unlock, ACP permissions, queued/direct messages, release, mobile layouts, and character lab.');
 } finally {
   await client?.close();
   if (cdp && !browserExited) {
